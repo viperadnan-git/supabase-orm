@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from ._client import get_client
 from ._embed import Relation, build_select, collect_relations
 from ._exceptions import SupabaseORMDoesNotExist, SupabaseORMUsageError
+from ._predicates import _FieldsAccess
 from ._query import QueryBuilder
 from ._serializers import serialize
 
@@ -77,6 +78,10 @@ class SupabaseModel(BaseModel):
     __list_adapter__: ClassVar[TypeAdapter | None] = None
 
     query: ClassVar[_QueryDescriptor] = _QueryDescriptor()
+    # Typed predicate namespace — ``Pet.f.age >= 5`` returns a Predicate.
+    # The actual ``_FieldsAccess`` instance is attached per subclass in
+    # ``__pydantic_init_subclass__``; declared here for type checkers.
+    f: ClassVar[_FieldsAccess]
 
     def __init_subclass__(
         cls,
@@ -107,6 +112,7 @@ class SupabaseModel(BaseModel):
         )
         cls.__relations__ = collect_relations(cls)
         cls.__list_adapter__ = TypeAdapter(list[cls])
+        cls.f = _FieldsAccess(cls)
         _TABLE_REGISTRY.setdefault(cls.__table__, []).append(cls)
 
     # ─── Builder entry point ───────────────────────────────────────────────

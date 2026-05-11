@@ -12,7 +12,7 @@ Don't reuse a builder after a terminal call; create a fresh one off ``Model.quer
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable, Generic, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, Self, TypeVar, cast, overload
 
 from ._client import get_client
 from ._exceptions import (
@@ -21,6 +21,7 @@ from ._exceptions import (
     SupabaseORMUsageError,
 )
 from ._filters import apply_op, compile_predicate
+from ._predicates import Predicate
 from ._serializers import serialize
 
 if TYPE_CHECKING:
@@ -105,19 +106,58 @@ class _Filterable:
 
     # ─── Compound predicates ───────────────────────────────────────────────
 
-    def or_(
-        self,
-        *branches: Callable[["_PredicateGroup"], "_PredicateGroup"],
-    ) -> Self:
-        compiled = _compile_branches(self._model, branches)
-        return self._apply_predicate_group(f"or({compiled})")
+    # Two ways to compose OR/NOT branches:
+    #
+    #   1. Predicate objects (preferred, since 0.2.0) ─ typed & composable::
+    #
+    #          Pet.query.or_(
+    #              Pet.f.species == "cat",
+    #              (Pet.f.species == "dog") & (Pet.f.age >= 5),
+    #          )
+    #
+    #   2. Lambda callbacks (legacy, kept for backward compat with 0.1.x)::
+    #
+    #          Pet.query.or_(lambda q: q.eq("species", "cat"))
+    #
+    # The two forms can't be mixed in a single call — we raise ``UsageError``
+    # rather than silently picking one. ``@overload`` gives type checkers
+    # the precise signature for each form.
 
+    @overload
+    def or_(self, *predicates: Predicate) -> Self: ...
+    @overload
+    def or_(
+        self, *branches: Callable[["_PredicateGroup"], "_PredicateGroup"]
+    ) -> Self: ...
+    def or_(self, *args: Any) -> Self:
+        if not args:
+            raise SupabaseORMUsageError("or_() requires at least one branch.")
+        is_pred = [isinstance(a, Predicate) for a in args]
+        if all(is_pred):
+            compiled = ",".join(cast(Predicate, a)._compile() for a in args)
+            return self._apply_predicate_group(f"or({compiled})")
+        if not any(is_pred):
+            compiled = _compile_branches(self._model, args)
+            return self._apply_predicate_group(f"or({compiled})")
+        raise SupabaseORMUsageError(
+            "or_() can't mix Predicate args with lambda branches in a single call."
+        )
+
+    @overload
+    def not_(self, predicate: Predicate) -> Self: ...
+    @overload
     def not_(
-        self,
-        branch: Callable[["_PredicateGroup"], "_PredicateGroup"],
-    ) -> Self:
+        self, branch: Callable[["_PredicateGroup"], "_PredicateGroup"]
+    ) -> Self: ...
+    def not_(self, arg: Any) -> Self:
+        if isinstance(arg, Predicate):
+            # Route through ``~`` (i.e. _PredicateNot._compile) so atoms get
+            # wrapped in ``not.and(...)`` — bare ``not.col.op.val`` doesn't
+            # parse inside PostgREST's logic tree.
+            return self._apply_predicate_group((~arg)._compile())
+        # Legacy lambda form.
         sub = _PredicateGroup(self._model)
-        branch(sub)
+        arg(sub)
         return self._apply_predicate_group(f"not.and({sub._compile()})")
 
 

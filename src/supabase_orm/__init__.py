@@ -22,6 +22,7 @@ from ._exceptions import (
     SupabaseORMUsageError,
 )
 from ._filters import register_op
+from ._predicates import Column, Predicate
 from ._query import QueryBuilder
 from ._rpc import rpc, rpc_maybe_one, rpc_one, rpc_scalar
 from ._serializers import register_serializer, serialize
@@ -32,6 +33,8 @@ __all__ = [
     "SupabaseModel",
     "Relation",
     "QueryBuilder",
+    "Column",
+    "Predicate",
     "lifespan",
     "get_client",
     "set_client",

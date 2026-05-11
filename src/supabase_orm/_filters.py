@@ -150,17 +150,36 @@ def _is(b, c, v):
     return b.is_(c, v)
 
 
-@register_op("contains")
+# PostgREST array/range ops have two quirks vs. simple operators:
+#  * URL-tree wire names are short (``cs`` / ``cd`` / ``ov``); the long
+#    Python names map to supabase-py builder methods only.
+#  * Array literals use Postgres ``{a,b}`` braces inside predicate strings
+#    (``in`` uses ``(a,b)`` parens — different shape, same idea).
+# Builder-side serialization is handled by supabase-py; we only need the
+# predicate-string form here.
+def _array_pred_value(val: Any) -> str:
+    val = serialize(val)
+    if isinstance(val, (list, tuple, set)):
+        return "{" + ",".join(_pred_value(v).strip('"') for v in val) + "}"
+    return _pred_value(val)
+
+
+def _array_pred(wire: str) -> PredicateCompiler:
+    """Factory for the three array/range ops — same shape, different wire."""
+    return lambda c, v: f"{c}.{wire}.{_array_pred_value(v)}"
+
+
+@register_op("contains", wire="cs", predicate=_array_pred("cs"))
 def _contains(b, c, v):
     return b.contains(c, serialize(v))
 
 
-@register_op("contained_by")
+@register_op("contained_by", wire="cd", predicate=_array_pred("cd"))
 def _contained_by(b, c, v):
     return b.contained_by(c, serialize(v))
 
 
-@register_op("overlaps")
+@register_op("overlaps", wire="ov", predicate=_array_pred("ov"))
 def _overlaps(b, c, v):
     return b.overlaps(c, serialize(v))
 
