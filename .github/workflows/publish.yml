@@ -1,0 +1,97 @@
+name: Publish to PyPI
+
+# Fires when a PEP 440 version tag is pushed (e.g. 0.1.0, 0.1.0a1, 0.1.0.dev0).
+# We tag without a ``v`` prefix so hatch-vcs reads the tag as the version directly.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Single source of truth for the PyPI distribution name. Used in the
+# environment URL, the release-notes install snippet, and the PyPI link.
+env:
+  PACKAGE_NAME: supabase-orm
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+
+    # Requires a "pypi" environment with trusted-publishing configured.
+    # See https://docs.pypi.org/trusted-publishers/
+    environment:
+      name: pypi
+      url: https://pypi.org/p/${{ env.PACKAGE_NAME }}
+
+    permissions:
+      id-token: write   # trusted publishing
+      contents: write   # create GitHub release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # hatch-vcs needs full history to resolve the tag
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Run mock tests
+        run: uv run pytest
+
+      - name: Build distribution
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${GITHUB_REF_NAME}"
+
+          # PEP 440 pre-release? aN / bN / rcN / .devN
+          PRERELEASE_FLAG=""
+          if [[ "${VERSION}" =~ (a|b|rc|\.dev)[0-9] ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Categorised notes from GitHub's native generator
+          # (driven by .github/release.yml if present).
+          AUTO_NOTES=$(gh api \
+            -X POST \
+            "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${VERSION}" \
+            --jq .body)
+
+          {
+            echo "## Install"
+            echo
+            echo '```bash'
+            echo "pip install '${PACKAGE_NAME}==${VERSION}'"
+            echo '```'
+            echo
+            echo "PyPI: https://pypi.org/project/${PACKAGE_NAME}/${VERSION}/"
+            echo
+            echo "${AUTO_NOTES}"
+          } > /tmp/release-notes.md
+
+          gh release create "${VERSION}" \
+            --title "${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            --verify-tag \
+            ${PRERELEASE_FLAG} \
+            dist/*
