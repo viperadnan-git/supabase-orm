@@ -14,6 +14,8 @@
 
 - **Type-safe query builder.** Every operator on `Model.query` is a real method with a real signature — autocomplete works, typos surface as `AttributeError` at call time, not as silent server-side errors.
 
+- **Typed predicate expressions.** `Pet.f.age >= 5` builds a composable `Predicate`. Combine with `|` / `&` / `~` and pass to `.or_()` / `.not_()`. Reads as boolean logic, type-checks as expressions.
+
 - **Pydantic v2 throughout.** Your model *is* the row schema, the response schema, and the request body schema. No DTO layer.
 
 - **Async-first.** Built for `asyncio` and FastAPI — every terminal call is `await`-able, every chain is a fresh builder.
@@ -26,7 +28,7 @@
 
 - **Opt-in foot-gun guards.** Unfiltered bulk `delete()` / `update()` raise unless you pass `allow_unfiltered=True`.
 
-- **Tested both ways.** 166 mock tests cover the wire contract (every operator, every serializer, every shorthand). 34 integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
+- **Tested both ways.** 200+ mock tests cover the wire contract (every operator, every serializer, every shorthand, every predicate composition). 50+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
 
 ---
 
@@ -71,9 +73,15 @@ class PetWithOwner(SupabaseModel, table="pets"):
 
 
 async with lifespan(SUPABASE_URL, SUPABASE_KEY):
-    # Read
+    # Read — chain style for sequential AND
     cats = await Pet.query.eq("species", "cat").order_by("-created_at").limit(10).all()
     one = await PetWithOwner.get(some_id)
+
+    # Read — typed predicates for OR / NOT / nested boolean logic
+    rescues = await Pet.query.or_(
+        Pet.f.species == "cat",
+        (Pet.f.species == "dog") & (Pet.f.adopted == False),
+    ).all()
 
     # Write
     p = await Pet.create(name="Whiskers", species="cat", adopted=False)
@@ -167,7 +175,7 @@ mini_rows = await Pet.query.eq("adopted", False).as_(PetMini).all()
 
 ### Filter operators
 
-Every operator below works as a method on `Model.query` **and** inside `or_()` / `not_()` predicate lambdas:
+Every operator below works as a method on `Model.query` (chain style) and as a method/operator on `Model.f.<column>` (predicate style):
 
 ```python
 Pet.query.eq("species", "cat")
@@ -182,18 +190,80 @@ Pet.query.overlaps("tags", ["indoor"])
 Pet.query.fts("description", "fluffy")          # plus plfts / phfts / wfts
 ```
 
-### Compound predicates
+### Typed predicates (`Pet.f`)
+
+For OR / NOT / nested boolean logic, use the `Model.f` namespace. Every column is a typed `Column[T]` with operator overloads — `==`, `!=`, `<`, `<=`, `>`, `>=` build atomic predicates, and `|` / `&` / `~` compose them.
 
 ```python
-# OR across branches:
+from supabase_orm import SupabaseModel
+
+class Pet(SupabaseModel, table="pets"):
+    id: UUID
+    name: str
+    species: str
+    age: int
+    adopted: bool
+    tags: list[str]
+
+# Atomic predicates — what `==`, `>=` etc. return:
+Pet.f.species == "cat"            # column.eq.value
+Pet.f.age >= 5
+Pet.f.name.like("Mr%")
+Pet.f.tags.contains(["indoor"])
+Pet.f.owner_id.is_null()
+```
+
+Compose with boolean operators:
+
+```python
+# OR
+await Pet.query.or_(
+    Pet.f.species == "cat",
+    Pet.f.species == "dog",
+).all()
+
+# OR with AND inside a branch
+await Pet.query.or_(
+    Pet.f.species == "cat",
+    (Pet.f.species == "dog") & (Pet.f.age >= 5),
+).all()
+
+# NOT — negates any predicate, atomic or compound
+await Pet.query.not_(Pet.f.adopted == True).all()
+await Pet.query.not_((Pet.f.species == "cat") | (Pet.f.species == "dog")).all()
+```
+
+The chain and predicates compose freely — chain handles sequential AND, predicates handle boolean logic:
+
+```python
+await (
+    Pet.query.eq("owner_id", uid)                       # chain: AND
+    .or_(Pet.f.species == "cat", Pet.f.species == "dog") # predicate: OR
+    .order_by("-created_at")
+    .limit(20)
+    .all()
+)
+```
+
+#### Foot-gun guards
+
+```python
+if Pet.f.age >= 5:           # TypeError: Predicate is not a bool
+    ...
+```
+
+A predicate is an expression that builds a query — it has no truth value at the call site. The runtime rejects `bool(predicate)` loudly so `if Pet.f.adopted == True:` mistakes fail at the first hit instead of always being truthy.
+
+#### Lambda form
+
+```python
 await Pet.query.or_(
     lambda q: q.eq("species", "cat"),
     lambda q: q.eq("species", "dog").gte("age", 5),
 ).all()
-
-# NOT:
-await Pet.query.not_(lambda q: q.eq("adopted", True)).all()
 ```
+
+Prefer the `Pet.f` form — it composes, reads as boolean logic, and gives operator-level type safety.
 
 ### `match()` — multi-column equality
 
@@ -201,7 +271,7 @@ await Pet.query.not_(lambda q: q.eq("adopted", True)).all()
 await Pet.query.match({"species": "cat", "adopted": False}).all()
 ```
 
-PostgREST's `match` is multi-column by design and has no predicate-string form, so it isn't usable inside `or_()` / `not_()`.
+`match` is a `postgrest-py` convenience — it just expands to multiple `eq` filters on the wire, equivalent to chaining `.eq()` per pair or composing `(Pet.f.a == 1) & (Pet.f.b == 2)`. Use whichever reads best.
 
 ### Ordering & pagination
 
