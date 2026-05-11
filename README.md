@@ -451,7 +451,7 @@ The integration suite needs a Supabase project with the test schema applied. See
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/viperadnan/supabase-orm](https://github.com/viperadnan/supabase-orm). Run the test suite before sending a PR:
+Issues and PRs welcome at [github.com/viperadnan-git/supabase-orm](https://github.com/viperadnan-git/supabase-orm). Run the test suite before sending a PR:
 
 ```bash
 uv run pytest                       # mock suite (fast, no network)

@@ -32,10 +32,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/viperadnan/supabase-orm"
-Repository = "https://github.com/viperadnan/supabase-orm"
-Issues = "https://github.com/viperadnan/supabase-orm/issues"
-Documentation = "https://github.com/viperadnan/supabase-orm#readme"
+Homepage = "https://github.com/viperadnan-git/supabase-orm"
+Repository = "https://github.com/viperadnan-git/supabase-orm"
+Issues = "https://github.com/viperadnan-git/supabase-orm/issues"
+Documentation = "https://github.com/viperadnan-git/supabase-orm#readme"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
