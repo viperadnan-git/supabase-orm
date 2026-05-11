@@ -1,0 +1,88 @@
+[project]
+name = "supabase-orm"
+description = "Lightweight async ORM on top of supabase-py with Pydantic validation."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Adnan Ahmad", email = "viperadnan@gmail.com" }]
+license = { text = "Apache-2.0" }
+dynamic = ["version"]
+keywords = ["supabase", "postgrest", "orm", "pydantic", "async", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Framework :: FastAPI",
+    "Framework :: Pydantic",
+    "Framework :: Pydantic :: 2",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.13.4",
+    "supabase>=2.30.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/viperadnan/supabase-orm"
+Repository = "https://github.com/viperadnan/supabase-orm"
+Issues = "https://github.com/viperadnan/supabase-orm/issues"
+Documentation = "https://github.com/viperadnan/supabase-orm#readme"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/supabase_orm/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/supabase_orm"]
+
+[tool.nizm.hooks]
+ruff = { cmd = "uvx ruff check --fix {staged_files} && uvx ruff format {staged_files}", glob = "*.py" }
+
+[tool.ruff.lint]
+select = ["F", "I"]
+fixable = ["F401", "I"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.12",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Share one event loop across the whole session — the integration suite's
+# AsyncClient is session-scoped, so per-test loops would close it mid-run.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+markers = [
+    "integration: tests that hit a real Supabase project (require SUPABASE_TEST_URL + SUPABASE_TEST_KEY).",
+]
+# Treat any warning we don't explicitly silence as an error, so regressions
+# in our own code surface immediately. Third-party deprecations we can't
+# fix from here are filtered through.
+filterwarnings = [
+    "error",
+    # supabase-py 2.x emits these when constructing its sub-clients; they
+    # come from inside the library, not from our call sites.
+    "ignore:The 'timeout' parameter is deprecated.*:DeprecationWarning",
+    "ignore:The 'verify' parameter is deprecated.*:DeprecationWarning",
+]
