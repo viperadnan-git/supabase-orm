@@ -468,7 +468,7 @@ app = FastAPI(lifespan=lifespan)
 
 ### Per-request RLS via JWT
 
-The client is stored in a `ContextVar`, so each FastAPI request runs in its own copied context. Pair `use_client()` with a per-request authenticated client to isolate the JWT — and therefore the RLS identity — to that request only:
+The default client is a module-level reference set by `lifespan()` (visible to every task — required because ASGI servers spawn each request handler as a sibling task of the lifespan task, not a child). Per-request overrides go through `use_client()`, which uses a `ContextVar` so concurrent requests don't see each other's clients. Pair the two for safe per-request RLS:
 
 ```python
 from supabase import acreate_client

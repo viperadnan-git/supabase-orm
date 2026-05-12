@@ -12,7 +12,7 @@ from supabase_orm import (
     set_client,
     use_client,
 )
-from supabase_orm._client import _client
+from supabase_orm._client import _client_override
 
 
 def test_get_client_without_init_raises():
@@ -87,13 +87,67 @@ async def test_use_client_restores_even_on_exception():
 # ─── ContextVar semantics ────────────────────────────────────────────────
 
 
-def test_client_is_a_contextvar():
-    """Sanity check: the storage backend is a ContextVar (not a module
-    global). Documents the design assumption that per-request isolation
-    relies on."""
+def test_override_is_a_contextvar():
+    """Sanity check: the per-request override backend is a ContextVar so
+    use_client() doesn't leak across concurrent requests."""
     from contextvars import ContextVar
 
-    assert isinstance(_client, ContextVar)
+    assert isinstance(_client_override, ContextVar)
+
+
+# ─── Regression: lifespan task vs request task (the FastAPI bug) ─────────
+
+
+async def test_set_client_visible_across_independent_tasks():
+    """Reproduces the bug a ContextVar-only design has under ASGI servers.
+
+    Uvicorn runs ``lifespan`` in one task and each request handler in a
+    separate, sibling task. ``ContextVar.set()`` only mutates the
+    setter's own context; sibling tasks (request handlers) inherit
+    uvicorn's root context, where the var is still its default.
+
+    set_client() must therefore propagate to ALL tasks — not just
+    descendants of the setter — by storing in a module global. This test
+    spawns the setter as a finished sibling task, then a separate reader
+    task; the reader must see what the setter wrote."""
+    sentinel = object()
+
+    async def setter() -> None:
+        set_client(sentinel)  # type: ignore[arg-type]
+
+    async def reader():
+        return get_client()
+
+    try:
+        await asyncio.create_task(setter())  # completes before we read
+        result = await asyncio.create_task(reader())
+        assert result is sentinel
+    finally:
+        set_client(None)
+
+
+async def test_use_client_override_still_isolated_per_task():
+    """The default is a global, but per-request use_client() overrides
+    must STILL be ContextVar-isolated — otherwise concurrent requests
+    overwrite each other's RLS-scoped client."""
+    default = object()
+    set_client(default)  # type: ignore[arg-type]
+
+    async def request(label: str) -> tuple[object, object]:
+        per_request = f"client-{label}"
+        async with use_client(per_request):  # type: ignore[arg-type]
+            await asyncio.sleep(0)  # let other tasks run between set & read
+            return get_client(), per_request  # type: ignore[return-value]
+
+    try:
+        results = await asyncio.gather(request("a"), request("b"), request("c"))
+        # Each task saw its own override, not anyone else's.
+        for got, expected in results:
+            assert got == expected
+        # After all overrides exit, default is back.
+        assert get_client() is default
+    finally:
+        set_client(None)
 
 
 # ─── QueryBuilder resolves client at terminal time, not chain start ──────

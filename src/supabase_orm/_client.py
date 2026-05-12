@@ -66,13 +66,29 @@ from ._exceptions import SupabaseORMUsageError
 
 _log = logging.getLogger("supabase_orm")
 
-_client: ContextVar[AsyncClient | None] = ContextVar(
-    "supabase_orm_client", default=None
+# Two-level lookup:
+#
+#   * ``_default_client`` is a module global, set by ``set_client()`` /
+#     ``lifespan()``. Visible to every task on the loop — the right
+#     semantics for "app-wide default set at startup," which under ASGI
+#     servers (uvicorn/hypercorn) means a *different* task than the one
+#     handling each request. ContextVar inheritance only works for child
+#     tasks of the setter; ASGI request handlers are siblings, not
+#     children, so a ContextVar-only design silently sees ``None``.
+#
+#   * ``_client_override`` is a ``ContextVar``, set by ``use_client()``.
+#     Per-task isolated for safe per-request RLS overrides without leaking
+#     across concurrent requests.
+#
+# ``get_client()`` checks the override first, falls back to the default.
+_default_client: AsyncClient | None = None
+_client_override: ContextVar[AsyncClient | None] = ContextVar(
+    "supabase_orm_client_override", default=None
 )
 
 
 def get_client() -> AsyncClient:
-    c = _client.get()
+    c = _client_override.get() or _default_client
     if c is None:
         raise SupabaseORMUsageError(
             "Supabase AsyncClient not initialized. "
@@ -83,13 +99,14 @@ def get_client() -> AsyncClient:
 
 
 def set_client(client: AsyncClient | None) -> None:
-    """Bind ``client`` in the current async context.
+    """Bind ``client`` as the app-wide default.
 
-    Call from app startup (or use :func:`lifespan`) to set the
-    app-wide default; per-request overrides should prefer
-    :func:`use_client` so the previous binding is restored on exit.
+    Visible to every task. Call from app startup (or use :func:`lifespan`).
+    For per-request overrides that must not leak across concurrent requests,
+    use :func:`use_client` instead.
     """
-    _client.set(client)
+    global _default_client
+    _default_client = client
 
 
 @asynccontextmanager
@@ -97,32 +114,34 @@ async def use_client(client: AsyncClient) -> AsyncIterator[AsyncClient]:
     """Bind ``client`` for the duration of the ``async with`` block only.
 
     Restores the previous binding on exit. Safe under concurrent FastAPI
-    requests: each request runs in its own copied context, so the
-    override never leaks across requests::
+    requests: each request runs in its own task with its own ContextVar
+    snapshot, so the override never leaks across requests::
 
         async with use_client(per_request_client):
             row = await Pet.get(some_id)
     """
-    token = _client.set(client)
+    token = _client_override.set(client)
     try:
         yield client
     finally:
-        _client.reset(token)
+        _client_override.reset(token)
 
 
 @asynccontextmanager
 async def lifespan(url: str, key: str) -> AsyncIterator[AsyncClient]:
     """Async context manager that owns one AsyncClient for its lifetime.
 
-    Yields the client so callers can stash it on app state if they want;
-    most code should just import ``get_client`` from inside request handlers.
+    Sets the client as the app-wide default via :func:`set_client`, so
+    request handlers spawned in sibling tasks (the standard ASGI shape)
+    can find it. Yields the client so callers can stash it on app state
+    if they want.
     """
     client = await acreate_client(url, key)
-    token = _client.set(client)
+    set_client(client)
     try:
         yield client
     finally:
-        _client.reset(token)
+        set_client(None)
         # Best-effort teardown of the underlying httpx pools. supabase-py's
         # AsyncClient doesn't expose a top-level close as of 2.x; we close
         # each subclient that does so connection pools drain cleanly on
