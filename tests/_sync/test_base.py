@@ -1,3 +1,6 @@
+# DO NOT EDIT — generated from tests/_async/test_base.py by scripts/gen_sync.py.
+# Run `python scripts/gen_sync.py` (or rebuild the package) to regenerate.
+
 """SupabaseModel behavior — subclass setup, get/find/create/save/update/delete."""
 
 from __future__ import annotations
@@ -7,7 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from supabase_orm import (
+from supabase_orm._sync import (
     Relation,
     SupabaseModel,
     SupabaseORMDoesNotExist,
@@ -76,7 +79,7 @@ def test_validate_column_unknown():
 # ─── get / find ──────────────────────────────────────────────────────────
 
 
-async def test_get_returns_validated_row(fake_client):
+def test_get_returns_validated_row(fake_client):
     pid = uuid4()
     fake_client.queue(
         FakeResponse(
@@ -90,24 +93,24 @@ async def test_get_returns_validated_row(fake_client):
             ]
         )
     )
-    p = await Pet.get(pid)
+    p = Pet.get(pid)
     assert isinstance(p, Pet)
     assert p.id == pid
     assert p.name == "Whiskers"
 
 
-async def test_get_missing_raises(fake_client):
+def test_get_missing_raises(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     with pytest.raises(SupabaseORMDoesNotExist):
-        await Pet.get(uuid4())
+        Pet.get(uuid4())
 
 
-async def test_find_returns_none_on_miss(fake_client):
+def test_find_returns_none_on_miss(fake_client):
     fake_client.queue(FakeResponse(data=[]))
-    assert await Pet.find(uuid4()) is None
+    assert Pet.find(uuid4()) is None
 
 
-async def test_find_returns_row_on_hit(fake_client):
+def test_find_returns_row_on_hit(fake_client):
     pid = uuid4()
     fake_client.queue(
         FakeResponse(
@@ -121,14 +124,14 @@ async def test_find_returns_row_on_hit(fake_client):
             ]
         )
     )
-    p = await Pet.find(pid)
+    p = Pet.find(pid)
     assert p is not None and p.id == pid
 
 
 # ─── create / bulk_create ────────────────────────────────────────────────
 
 
-async def test_create_flat_uses_insert_response_directly(fake_client):
+def test_create_flat_uses_insert_response_directly(fake_client):
     pid = uuid4()
     fake_client.queue(
         FakeResponse(
@@ -142,7 +145,7 @@ async def test_create_flat_uses_insert_response_directly(fake_client):
             ]
         )
     )
-    p = await Pet.create(id=pid, name="Whiskers", species="cat", adopted=False)
+    p = Pet.create(id=pid, name="Whiskers", species="cat", adopted=False)
     assert isinstance(p, Pet) and p.id == pid
 
     # Insert payload should have UUID stringified.
@@ -153,13 +156,13 @@ async def test_create_flat_uses_insert_response_directly(fake_client):
     assert payload["name"] == "Whiskers"
 
 
-async def test_create_returns_no_rows_raises(fake_client):
+def test_create_returns_no_rows_raises(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     with pytest.raises(ValueError, match="returned no rows"):
-        await Pet.create(id=uuid4(), name="x", species="cat", adopted=False)
+        Pet.create(id=uuid4(), name="x", species="cat", adopted=False)
 
 
-async def test_create_with_relations_does_followup_get(fake_client):
+def test_create_with_relations_does_followup_get(fake_client):
     pid = uuid4()
     uid = uuid4()
     # 1st response: insert returns the row (no embeds).
@@ -176,19 +179,19 @@ async def test_create_with_relations_does_followup_get(fake_client):
             ]
         ),
     )
-    p = await PetWithOwner.create(id=pid, name="P", owner_id=uid)
+    p = PetWithOwner.create(id=pid, name="P", owner_id=uid)
     assert p.owner.email == "a@b.c"
     # Two round-trips for relation models.
     assert len(fake_client.builders) == 2
 
 
-async def test_bulk_create_empty_list_is_noop(fake_client):
-    out = await Pet.bulk_create([])
+def test_bulk_create_empty_list_is_noop(fake_client):
+    out = Pet.bulk_create([])
     assert out == []
     assert fake_client.builders == []
 
 
-async def test_bulk_create_flat_returns_validated_list(fake_client):
+def test_bulk_create_flat_returns_validated_list(fake_client):
     a, b = uuid4(), uuid4()
     fake_client.queue(
         FakeResponse(
@@ -198,7 +201,7 @@ async def test_bulk_create_flat_returns_validated_list(fake_client):
             ]
         )
     )
-    rows = await Pet.bulk_create(
+    rows = Pet.bulk_create(
         [
             {"id": a, "name": "A", "species": "cat", "adopted": False},
             {"id": b, "name": "B", "species": "dog", "adopted": True},
@@ -210,9 +213,9 @@ async def test_bulk_create_flat_returns_validated_list(fake_client):
     assert insert_call[1][0][0]["id"] == str(a)
 
 
-async def test_bulk_create_empty_response(fake_client):
+def test_bulk_create_empty_response(fake_client):
     fake_client.queue(FakeResponse(data=[]))
-    out = await Pet.bulk_create(
+    out = Pet.bulk_create(
         [{"id": uuid4(), "name": "n", "species": "c", "adopted": True}]
     )
     assert out == []
@@ -221,7 +224,7 @@ async def test_bulk_create_empty_response(fake_client):
 # ─── save / update / delete / refresh ───────────────────────────────────
 
 
-async def test_save_persists_dirty_fields_only(fake_client):
+def test_save_persists_dirty_fields_only(fake_client):
     pid = uuid4()
     p = Pet(id=pid, name="A", species="cat", adopted=False)
     # Field-set is cleared after construction once we touch one attribute.
@@ -233,32 +236,32 @@ async def test_save_persists_dirty_fields_only(fake_client):
             data=[{"id": str(pid), "name": "B", "species": "cat", "adopted": False}]
         )
     )
-    await p.save()
+    p.save()
     # The update payload should ONLY contain ``name``.
     update_call = next(c for c in fake_client.builders[0].calls if c[0] == "update")
     payload = update_call[1][0]
     assert payload == {"name": "B"}
 
 
-async def test_save_with_no_dirty_returns_self_without_request(fake_client):
+def test_save_with_no_dirty_returns_self_without_request(fake_client):
     pid = uuid4()
     p = Pet(id=pid, name="A", species="cat", adopted=False)
     object.__setattr__(p, "__pydantic_fields_set__", set())
-    out = await p.save()
+    out = p.save()
     assert out is p
     assert fake_client.builders == []
 
 
-async def test_save_missing_row_raises(fake_client):
+def test_save_missing_row_raises(fake_client):
     pid = uuid4()
     p = Pet(id=pid, name="A", species="cat", adopted=False)
     p.name = "B"
     fake_client.queue(FakeResponse(data=[]))
     with pytest.raises(SupabaseORMDoesNotExist):
-        await p.save()
+        p.save()
 
 
-async def test_instance_update_assigns_and_saves(fake_client):
+def test_instance_update_assigns_and_saves(fake_client):
     pid = uuid4()
     p = Pet(id=pid, name="A", species="cat", adopted=False)
     fake_client.queue(
@@ -266,45 +269,45 @@ async def test_instance_update_assigns_and_saves(fake_client):
             data=[{"id": str(pid), "name": "Z", "species": "cat", "adopted": True}]
         )
     )
-    await p.update(name="Z", adopted=True)
+    p.update(name="Z", adopted=True)
     assert p.name == "Z"
     assert p.adopted is True
 
 
-async def test_instance_update_rejects_no_kwargs(fake_client):
+def test_instance_update_rejects_no_kwargs(fake_client):
     p = Pet(id=uuid4(), name="A", species="cat", adopted=False)
     with pytest.raises(SupabaseORMUsageError, match="at least one"):
-        await p.update()
+        p.update()
 
 
-async def test_instance_update_rejects_pk_change(fake_client):
+def test_instance_update_rejects_pk_change(fake_client):
     p = Pet(id=uuid4(), name="A", species="cat", adopted=False)
     with pytest.raises(SupabaseORMUsageError, match="primary key"):
-        await p.update(id=uuid4())
+        p.update(id=uuid4())
 
 
-async def test_instance_update_rejects_relation_field(fake_client):
+def test_instance_update_rejects_relation_field(fake_client):
     p = PetWithOwner(
         id=uuid4(),
         name="x",
         owner=User(id=uuid4(), email="a@b.c"),
     )
     with pytest.raises(SupabaseORMUsageError, match="relation"):
-        await p.update(owner=User(id=uuid4(), email="z@b.c"))
+        p.update(owner=User(id=uuid4(), email="z@b.c"))
 
 
-async def test_delete_runs_eq_pk(fake_client):
+def test_delete_runs_eq_pk(fake_client):
     pid = uuid4()
     p = Pet(id=pid, name="A", species="cat", adopted=False)
     fake_client.queue(FakeResponse(data=[]))
-    await p.delete()
+    p.delete()
     calls = fake_client.builders[0].calls
     assert ("delete", (), {}) in calls
     eq_call = next(c for c in calls if c[0] == "eq")
     assert eq_call[1] == ("id", str(pid))
 
 
-async def test_refresh_replaces_state(fake_client):
+def test_refresh_replaces_state(fake_client):
     pid = uuid4()
     p = Pet(id=pid, name="A", species="cat", adopted=False)
     fake_client.queue(
@@ -312,7 +315,7 @@ async def test_refresh_replaces_state(fake_client):
             data=[{"id": str(pid), "name": "Z", "species": "dog", "adopted": True}]
         )
     )
-    await p.refresh()
+    p.refresh()
     assert p.name == "Z"
     assert p.species == "dog"
     assert p.adopted is True
@@ -322,7 +325,7 @@ async def test_refresh_replaces_state(fake_client):
 
 
 def test_default_query_class_is_querybuilder():
-    from supabase_orm import QueryBuilder
+    from supabase_orm._sync import QueryBuilder
 
     class M(SupabaseModel, table="qc_default"):
         id: int
@@ -330,14 +333,14 @@ def test_default_query_class_is_querybuilder():
     assert M.__query_class__ is QueryBuilder
 
 
-async def test_per_model_query_class_kwarg(fake_client):
-    from supabase_orm import QueryBuilder
+def test_per_model_query_class_kwarg(fake_client):
+    from supabase_orm._sync import QueryBuilder
 
     from .conftest import FakeResponse
 
     class PaginatedQB(QueryBuilder):
-        async def paginate(self, *, page: int, per_page: int):
-            return await self.range(page * per_page, (page + 1) * per_page - 1).all()
+        def paginate(self, *, page: int, per_page: int):
+            return self.range(page * per_page, (page + 1) * per_page - 1).all()
 
     class M(SupabaseModel, table="qc_inline", query_class=PaginatedQB):
         id: int
@@ -346,14 +349,14 @@ async def test_per_model_query_class_kwarg(fake_client):
     assert isinstance(M.query, PaginatedQB)
 
     fake_client.queue(FakeResponse(data=[{"id": 1}]))
-    rows = await M.query.eq("id", 1).paginate(page=0, per_page=10)
+    rows = M.query.eq("id", 1).paginate(page=0, per_page=10)
     assert rows[0].id == 1
 
 
 def test_query_class_inherited_via_base_class():
     """The MRO-inheritance pattern: define a base model with __query_class__
     set, every subclass picks it up without specifying ``query_class=``."""
-    from supabase_orm import QueryBuilder
+    from supabase_orm._sync import QueryBuilder
 
     class _AppQB(QueryBuilder):
         marker = "app-qb"
@@ -375,7 +378,7 @@ def test_query_class_inherited_via_base_class():
 
 def test_per_model_kwarg_overrides_inherited():
     """An inline ``query_class=`` on a child overrides the base's choice."""
-    from supabase_orm import QueryBuilder
+    from supabase_orm._sync import QueryBuilder
 
     class BaseQB(QueryBuilder):
         marker = "base"

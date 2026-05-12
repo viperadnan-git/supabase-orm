@@ -1,28 +1,26 @@
-"""ORM public API.
+"""Synchronous public API.
 
-    from supabase_orm import SupabaseModel, Relation, lifespan, rpc
+Mirrors :mod:`supabase_orm` 1:1 against ``supabase-py``'s sync ``Client``
+instead of ``AsyncClient``. Intended for background workers, cron jobs,
+data scripts and any context where running an event loop just to await
+one query is overkill::
+
+    from supabase_orm.sync import SupabaseModel, lifespan, rpc
 
     class Pet(SupabaseModel, table="pets"):
         id: UUID
         name: str
         species: str
-        adopted: bool
 
-Internals live in underscore-prefixed modules; only names re-exported here
-are part of the supported surface.
+    with lifespan(URL, KEY):
+        for pet in Pet.query.eq("species", "cat").iter():
+            ...
+
+The sync implementation under ``supabase_orm._sync`` is generated from
+the async tree by ``scripts/gen_sync.py``; treat the async module as the
+canonical source.
 """
 
-from ._async._base import SupabaseModel
-from ._async._client import (
-    get_client,
-    init,
-    lifespan,
-    set_client,
-    shutdown,
-    use_client,
-)
-from ._async._query import QueryBuilder
-from ._async._rpc import rpc, rpc_maybe_one, rpc_one, rpc_scalar
 from ._embed import Relation
 from ._exceptions import (
     SupabaseORMDoesNotExist,
@@ -33,6 +31,17 @@ from ._exceptions import (
 from ._filters import register_op
 from ._predicates import Column, Order, Predicate
 from ._serializers import register_serializer, serialize
+from ._sync._base import SupabaseModel
+from ._sync._client import (
+    get_client,
+    init,
+    lifespan,
+    set_client,
+    shutdown,
+    use_client,
+)
+from ._sync._query import QueryBuilder
+from ._sync._rpc import rpc, rpc_maybe_one, rpc_one, rpc_scalar
 from ._version import __version__
 
 __all__ = [

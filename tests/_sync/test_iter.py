@@ -1,0 +1,234 @@
+# DO NOT EDIT — generated from tests/_async/test_iter.py by scripts/gen_sync.py.
+# Run `python scripts/gen_sync.py` (or rebuild the package) to regenerate.
+
+"""QueryBuilder.iter() — keyset pagination over the PK."""
+
+from __future__ import annotations
+
+from uuid import UUID, uuid4
+
+import pytest
+
+from supabase_orm._sync import SupabaseModel, SupabaseORMUsageError
+
+from .conftest import FakeResponse
+
+
+class Pet(SupabaseModel, table="pets_iter"):
+    id: UUID
+    name: str
+
+
+def _row(pid: UUID, name: str = "x") -> dict:
+    return {"id": str(pid), "name": name}
+
+
+# ─── Termination ─────────────────────────────────────────────────────────
+
+
+def test_iter_yields_nothing_for_empty_result(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    out = [p for p in Pet.query.iter(batch_size=5)]
+    assert out == []
+
+
+def test_iter_stops_when_batch_smaller_than_batch_size(fake_client):
+    """One partial batch ⇒ no follow-up request."""
+    a, b = uuid4(), uuid4()
+    fake_client.queue(FakeResponse(data=[_row(a, "A"), _row(b, "B")]))
+    out = [p for p in Pet.query.iter(batch_size=10)]
+    assert [p.name for p in out] == ["A", "B"]
+    # Only one terminal request was made.
+    assert len(fake_client.builders) == 1
+
+
+def test_iter_paginates_through_full_then_partial_batch(fake_client):
+    """Full batch ⇒ keep going. Partial batch ⇒ stop."""
+    ids = [uuid4() for _ in range(7)]
+    fake_client.queue(
+        FakeResponse(data=[_row(i, f"R{n}") for n, i in enumerate(ids[:3])]),
+        FakeResponse(data=[_row(i, f"R{n}") for n, i in enumerate(ids[3:6], start=3)]),
+        FakeResponse(data=[_row(ids[6], "R6")]),  # partial batch ⇒ done
+    )
+    out = [p for p in Pet.query.iter(batch_size=3)]
+    assert [p.name for p in out] == [f"R{n}" for n in range(7)]
+    assert len(fake_client.builders) == 3
+
+
+def test_iter_stops_when_batch_returns_empty_at_boundary(fake_client):
+    """Batch of exactly batch_size ⇒ next batch is empty ⇒ stop."""
+    ids = [uuid4() for _ in range(2)]
+    fake_client.queue(
+        FakeResponse(data=[_row(i, f"R{n}") for n, i in enumerate(ids)]),
+        FakeResponse(data=[]),  # exact-multiple boundary
+    )
+    out = [p for p in Pet.query.iter(batch_size=2)]
+    assert len(out) == 2
+    assert len(fake_client.builders) == 2
+
+
+# ─── Per-batch wire shape ────────────────────────────────────────────────
+
+
+def test_iter_first_batch_has_no_cursor_predicate(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    _ = [p for p in Pet.query.iter(batch_size=5)]
+    calls = fake_client.builders[0].calls
+    # First batch: select, order(id asc), limit(5). No gt() yet.
+    assert ("order", ("id",), {"desc": False}) in calls
+    assert ("limit", (5,), {}) in calls
+    assert not any(c[0] == "gt" for c in calls)
+
+
+def test_iter_subsequent_batches_advance_cursor_to_last_pk(fake_client):
+    """Each follow-up batch carries ``gt(pk, last_seen_pk)``."""
+    a, b = uuid4(), uuid4()
+    fake_client.queue(
+        FakeResponse(data=[_row(a, "A"), _row(b, "B")]),  # full batch
+        FakeResponse(data=[]),  # done
+    )
+    _ = [p for p in Pet.query.iter(batch_size=2)]
+
+    # Batch 2 must have gt("id", str(b)) — the last pk from batch 1.
+    second = fake_client.builders[1].calls
+    gt_calls = [c for c in second if c[0] == "gt"]
+    assert len(gt_calls) == 1
+    assert gt_calls[0][1] == ("id", str(b))
+
+
+def test_iter_layers_user_filters_on_every_batch(fake_client):
+    """The user's chained filters get replayed onto each batch."""
+    a = uuid4()
+    fake_client.queue(
+        FakeResponse(data=[_row(a, "A")]),
+    )
+    _ = [p for p in Pet.query.eq("name", "cat").iter(batch_size=10)]
+    calls = fake_client.builders[0].calls
+    assert ("eq", ("name", "cat"), {}) in calls
+
+
+# ─── Conflict detection ─────────────────────────────────────────────────
+
+
+def test_iter_rejects_chained_order_by():
+    with pytest.raises(SupabaseORMUsageError, match="iter\\(\\) owns ordering"):
+        Pet.query.order_by("name").iter()
+
+
+def test_iter_rejects_chained_limit():
+    with pytest.raises(SupabaseORMUsageError, match="iter\\(\\) owns ordering"):
+        Pet.query.limit(10).iter()
+
+
+def test_iter_rejects_chained_offset():
+    with pytest.raises(SupabaseORMUsageError, match="iter\\(\\) owns ordering"):
+        Pet.query.offset(5).iter()
+
+
+def test_iter_rejects_chained_range():
+    with pytest.raises(SupabaseORMUsageError, match="iter\\(\\) owns ordering"):
+        Pet.query.range(0, 9).iter()
+
+
+def test_iter_validates_pk_is_a_model_field():
+    """If the model declares a __pk__ that isn't a real field, fail fast."""
+
+    class Bad(SupabaseModel, table="bad_pk_iter", pk="nope"):
+        id: UUID
+
+    with pytest.raises(SupabaseORMUsageError, match="needs __pk__ 'nope'"):
+        Bad.query.iter()
+
+
+# ─── Pre-flight runs at call time, not at first __anext__ ──────────────
+
+
+def test_iter_conflict_raised_before_iteration_starts():
+    """Pre-flight checks must fire on .iter() call, not on the first
+    ``for`` step — so debugging stack traces point at the right line."""
+    with pytest.raises(SupabaseORMUsageError):
+        Pet.query.limit(1).iter()  # no `for` — error fires at call
+
+
+# ─── Composes with other terminals on the same chain ─────────────────────
+
+
+def test_chain_with_filters_and_predicates_iters_correctly(fake_client):
+    """Sanity: realistic compound query iterates as expected."""
+    a = uuid4()
+    fake_client.queue(FakeResponse(data=[_row(a, "A")]))
+    out = [
+        p
+        for p in Pet.query.eq("name", "cat")
+        .or_(Pet.f.name == "cat", Pet.f.name == "dog")
+        .iter(batch_size=10)
+    ]
+    assert len(out) == 1
+    calls = fake_client.builders[0].calls
+    assert any(c[0] == "or_" for c in calls)
+    assert any(c[0] == "eq" for c in calls)
+
+
+# ─── Projection: as_(Mini) narrows the per-batch select ──────────────────
+
+
+class PetWide(SupabaseModel, table="pets_iter_wide"):
+    id: UUID
+    name: str
+    species: str
+    adopted: bool
+    tags: list[str] = []
+
+
+class PetMini(SupabaseModel, table="pets_iter_wide"):
+    id: UUID
+    name: str
+
+
+def test_wide_and_mini_have_independent_select_strings():
+    """Two models on the same table compute their own __select__ from
+    their own field declarations — no leakage."""
+    assert PetWide.__select__ == "id,name,species,adopted,tags"
+    assert PetMini.__select__ == "id,name"
+
+
+def test_iter_uses_mini_select_string_on_every_batch(fake_client):
+    """as_(PetMini).iter() must send PetMini's narrow select on every
+    paginated request — not PetWide's full one."""
+    a, b, c = uuid4(), uuid4(), uuid4()
+    fake_client.queue(
+        FakeResponse(data=[_row(a, "A"), _row(b, "B")]),
+        FakeResponse(data=[_row(c, "C")]),  # partial batch ⇒ done
+    )
+    out = [m for m in PetWide.query.as_(PetMini).iter(batch_size=2)]
+    assert len(out) == 3
+    assert all(isinstance(m, PetMini) for m in out)
+
+    # Every batch's select call must use PetMini's narrow string,
+    # not PetWide's wide one.
+    for builder in fake_client.builders:
+        sel = next(c for c in builder.calls if c[0] == "select")
+        assert sel[1] == ("id,name",), (
+            f"expected PetMini's select on every batch, got {sel[1]}"
+        )
+
+
+def test_iter_without_as_uses_full_model_select(fake_client):
+    """Sanity: without as_(), the full model's select drives every batch."""
+    a = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[
+                {
+                    "id": str(a),
+                    "name": "A",
+                    "species": "cat",
+                    "adopted": False,
+                    "tags": [],
+                }
+            ]
+        )
+    )
+    _ = [p for p in PetWide.query.iter(batch_size=10)]
+    sel = next(c for c in fake_client.builders[0].calls if c[0] == "select")
+    assert sel[1] == ("id,name,species,adopted,tags",)

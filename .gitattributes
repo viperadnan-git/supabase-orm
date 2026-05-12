@@ -1,0 +1,3 @@
+# Generated from _async/ by scripts/gen_sync.py — edits are overwritten.
+src/supabase_orm/_sync/**  linguist-generated=true
+tests/_sync/**             linguist-generated=true

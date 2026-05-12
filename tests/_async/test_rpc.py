@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel
 
-from supabase_orm import rpc, rpc_maybe_one, rpc_one, rpc_scalar
+from supabase_orm._async import rpc, rpc_maybe_one, rpc_one, rpc_scalar
 
 from .conftest import FakeResponse
 

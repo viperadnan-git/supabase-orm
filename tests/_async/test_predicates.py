@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from supabase_orm import Column, Predicate, SupabaseModel
+from supabase_orm._async import Column, Predicate, SupabaseModel
 from supabase_orm._predicates import (
     _FieldsAccess,
     _PredicateAnd,
@@ -225,14 +225,14 @@ async def test_not_of_or_group(fake_client):
 
 
 async def test_or_requires_at_least_one_branch(fake_client):
-    from supabase_orm import SupabaseORMUsageError
+    from supabase_orm._async import SupabaseORMUsageError
 
     with pytest.raises(SupabaseORMUsageError, match="at least one branch"):
         Row.query.or_()
 
 
 async def test_or_rejects_mixed_predicate_and_lambda(fake_client):
-    from supabase_orm import SupabaseORMUsageError
+    from supabase_orm._async import SupabaseORMUsageError
 
     with pytest.raises(SupabaseORMUsageError, match="can't mix"):
         Row.query.or_(
@@ -288,7 +288,7 @@ async def test_predicate_or_composes_with_chain_filters(fake_client):
 
 
 def test_column_asc_returns_order():
-    from supabase_orm import Order
+    from supabase_orm._async import Order
 
     o = Row.f.age.asc()
     assert isinstance(o, Order)
@@ -310,7 +310,7 @@ def test_order_with_nulls_position():
 
 
 def test_order_parse_handles_dash_prefix_and_whitespace():
-    from supabase_orm import Order
+    from supabase_orm._async import Order
 
     assert Order.parse("name") == Order("name", desc=False)
     assert Order.parse("-name") == Order("name", desc=True)
@@ -373,7 +373,7 @@ async def test_order_by_validates_string_column():
 
 async def test_order_by_validates_order_column():
     """Even when wrapped in Order — validate against model fields."""
-    from supabase_orm import Order
+    from supabase_orm._async import Order
 
     with pytest.raises(AttributeError, match="no column 'nope'"):
         Row.query.order_by(Order("nope", desc=True))

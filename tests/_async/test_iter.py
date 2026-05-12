@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from supabase_orm import SupabaseModel, SupabaseORMUsageError
+from supabase_orm._async import SupabaseModel, SupabaseORMUsageError
 
 from .conftest import FakeResponse
 

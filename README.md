@@ -2,9 +2,9 @@
 
 # supabase-orm
 
-### A lightweight, async, Pydantic-native ORM on top of `supabase-py`.
+### A lightweight, Pydantic-native ORM on top of `supabase-py` — async-first, sync mirror generated.
 
-[Features](#features) · [Install](#install) · [Quick start](#quick-start) · [Models](#defining-models) · [Querying](#querying) · [Writes](#writes) · [RPC](#rpc) · [FastAPI](#fastapi-integration) · [Extending](#extending)
+[Features](#features) · [Install](#install) · [Quick start](#quick-start) · [Models](#defining-models) · [Querying](#querying) · [Writes](#writes) · [RPC](#rpc) · [Lifecycle](#client-lifecycle) · [Extending](#extending)
 
 </div>
 
@@ -20,7 +20,7 @@
 
 - **Pydantic v2 throughout.** Your model *is* the row schema, the response schema, and the request body schema. No DTO layer.
 
-- **Async-first.** Built for `asyncio` and FastAPI — every terminal call is `await`-able, every chain is a fresh builder.
+- **Async-first, sync mirror included.** Built for `asyncio` and FastAPI. A byte-for-byte sync API lives at `supabase_orm.sync`, generated from the same source via `unasync` — identical surface for cron jobs, Celery workers, and scripts where running an event loop is overkill.
 
 - **PostgREST embeds, declared at the type level.** Mark a field as `Annotated[Owner, Relation(...)]` and the ORM builds the right `select=` string for you, including `!inner` / FK hints / per-relation filters.
 
@@ -30,7 +30,7 @@
 
 - **Opt-in foot-gun guards.** Unfiltered bulk `delete()` / `update()` raise unless you pass `allow_unfiltered=True`.
 
-- **Tested both ways.** 230+ mock tests cover the wire contract (every operator, every serializer, every shorthand, predicate composition, keyset iteration). 60+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
+- **Tested both ways.** 440+ mock tests (async + sync trees) cover the wire contract — every operator, every serializer, every shorthand, predicate composition, keyset iteration. 60+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
 
 ---
 
@@ -94,6 +94,30 @@ async with lifespan(SUPABASE_URL, SUPABASE_KEY):
     await Pet.query.eq("adopted", False).update(adopted=True)
     await Pet.query.eq("species", "fish").lt("created_at", cutoff).delete()
 ```
+
+### Sync mode
+
+Same model classes, same chain syntax, same predicates. Switch the import and drop `await` / `async`:
+
+```python
+from supabase_orm.sync import SupabaseModel, init, shutdown
+
+class Pet(SupabaseModel, table="pets"):
+    id: UUID
+    name: str
+    species: str
+
+from supabase import create_client
+init(create_client(SUPABASE_URL, SUPABASE_KEY))
+
+cats = Pet.query.eq("species", "cat").limit(10).all()
+for p in Pet.query.eq("species", "cat").iter():
+    process(p)
+
+shutdown()                                          # optional — process exit drains pools anyway
+```
+
+The sync tree is generated from the async source — no second implementation to keep in sync. See [Client lifecycle](#client-lifecycle) for the four entry points (`lifespan`, `init`, `set_client`, `use_client`) and when each fits.
 
 ---
 
@@ -449,9 +473,20 @@ Keyword arguments map directly to the SQL function's parameter names — PostgRE
 
 ---
 
-## FastAPI integration
+## Client lifecycle
 
-### Lifespan
+Four entry points cover the standard deployment shapes. Pick by *who owns the client* and *whether you need a context-manager boundary*:
+
+| Entry point         | Owns the client | Shape                                        | Use for                                          |
+|---------------------|-----------------|----------------------------------------------|--------------------------------------------------|
+| `lifespan(url, key)`| orm             | `async with` / `with` block                  | FastAPI / ASGI apps, anywhere with a startup hook |
+| `init(client)`      | orm             | one-liner, no `with`                         | scripts, cron, Celery workers                    |
+| `set_client(client)`| caller          | one-liner, no `with`                         | tests handing in fakes, advanced setups          |
+| `use_client(client)`| caller          | per-block `async with` / `with`              | per-request RLS overrides under concurrent load  |
+
+`init()` and `lifespan()` register ownership: `shutdown()` (called explicitly or by `lifespan`'s `__aexit__`) will drain the client's httpx pools. `set_client()` only binds — caller stays responsible for teardown.
+
+### FastAPI / ASGI
 
 ```python
 from contextlib import asynccontextmanager
@@ -466,9 +501,48 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 ```
 
+Inside a handler, just call the ORM as usual:
+
+```python
+@app.get("/pets", response_model=list[Pet])
+async def list_pets():
+    return await Pet.query.order_by("-created_at").all()
+```
+
+### Scripts, cron, Celery workers
+
+When there's no `with`-block-shaped startup hook, use `init` / `shutdown` directly:
+
+```python
+from supabase import acreate_client
+from supabase_orm import init, shutdown
+
+async def main():
+    init(await acreate_client(SUPABASE_URL, SUPABASE_KEY))
+    try:
+        async for pet in Pet.query.eq("species", "cat").iter():
+            process(pet)
+    finally:
+        await shutdown()                            # optional — drains httpx pools
+```
+
+Sync flavour:
+
+```python
+from supabase import create_client
+from supabase_orm.sync import init, shutdown
+
+init(create_client(SUPABASE_URL, SUPABASE_KEY))
+for pet in Pet.query.eq("species", "cat").iter():
+    process(pet)
+shutdown()                                          # optional
+```
+
+For short-lived processes, you can skip `shutdown()` entirely — process death drains the pools.
+
 ### Per-request RLS via JWT
 
-The default client is a module-level reference set by `lifespan()` (visible to every task — required because ASGI servers spawn each request handler as a sibling task of the lifespan task, not a child). Per-request overrides go through `use_client()`, which uses a `ContextVar` so concurrent requests don't see each other's clients. Pair the two for safe per-request RLS:
+`lifespan()` sets a module-wide default visible to every task (ASGI request handlers are *siblings* of the lifespan task, not children, so `ContextVar` inheritance wouldn't reach them). Per-request overrides go through `use_client()`, which uses a `ContextVar` and is safe under concurrent load — each request runs in its own task with its own snapshot.
 
 ```python
 from supabase import acreate_client
@@ -488,29 +562,22 @@ async def per_request_client(request, call_next):
         return await call_next(request)
 ```
 
-Inside a handler, just call the ORM as usual — Postgres RLS sees the user:
-
-```python
-@app.get("/me/pets", response_model=list[Pet])
-async def my_pets():
-    return await Pet.query.order_by("-created_at").all()
-```
-
 > [!IMPORTANT]
 > Don't mutate the app-wide client's auth headers across requests (e.g. `get_client().postgrest.auth(jwt)` directly). The underlying postgrest sub-client is shared, so the mutation leaks across overlapping requests. `ContextVar` isolates *references*, not the objects they point at — `use_client()` with a per-request client is the only safe pattern.
 
-### Per-request override with a dedicated client
+### Custom client (tests, advanced)
 
-For background tasks, scripts, or any place outside the request lifecycle:
+Bind a client without transferring ownership — useful for handing in a fake under test, or when calling code already wraps the client in its own context manager:
 
 ```python
-from supabase_orm import use_client
+from supabase_orm import set_client
 
-async with use_client(some_other_client):
+set_client(my_fake_client)
+try:
     rows = await Pet.query.eq("species", "cat").all()
+finally:
+    set_client(None)            # shutdown() would also unbind, but won't close my_fake_client
 ```
-
-`use_client()` restores the previous binding on exit, including on exceptions.
 
 ---
 
@@ -625,16 +692,46 @@ uv run pytest -m "not integration"  # mock only — fast, no network
 uv run pytest -m integration        # integration only
 ```
 
+The mock suite runs against both the async and sync trees in one invocation (440+ tests total). Integration runs only against the async tree — see [Lifecycle](#client-lifecycle) and the architecture rationale; sync mock coverage proves the wire path independently.
+
 The integration suite needs a Supabase project with the test schema applied. See [`tests/integration/README.md`](tests/integration/README.md).
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/viperadnan-git/supabase-orm](https://github.com/viperadnan-git/supabase-orm). Run the test suite before sending a PR:
+Issues and PRs welcome at [github.com/viperadnan-git/supabase-orm](https://github.com/viperadnan-git/supabase-orm).
+
+### Architecture
+
+Async is the canonical source. The sync API at `supabase_orm.sync` is generated from `src/supabase_orm/_async/` into `src/supabase_orm/_sync/` via `unasync`, with a project-specific rule that also rewrites prose in docstrings/comments. Test trees follow the same pattern (`tests/_async/` → `tests/_sync/`).
+
+Edit only the async tree, then regenerate:
 
 ```bash
-uv run pytest                       # mock suite (fast, no network)
+uv run python scripts/gen_sync.py                 # regenerate _sync/
+uv run python scripts/gen_sync.py --check         # CI drift check (exit 1 on diff)
+```
+
+The hatch build hook (`scripts/hatch_build.py`) regenerates `_sync/` on every wheel/sdist build, so release artifacts always ship a fresh mirror.
+
+#### `# gen_sync: skip-block` directive
+
+For async-only code (e.g. `asyncio.gather` regressions, ASGI-specific lifespan tests) that has no meaningful sync counterpart, wrap it so the codegen drops it from the sync mirror:
+
+```python
+# gen_sync: skip-block
+import asyncio
+
+async def test_concurrent_tasks():
+    results = await asyncio.gather(...)
+# gen_sync: end-skip
+```
+
+### Running tests
+
+```bash
+uv run pytest                       # mock suite (fast, no network) — async + sync
 uv run pytest -m integration        # integration (needs .env)
 ```
 

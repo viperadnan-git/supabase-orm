@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from supabase_orm import SupabaseModel
+from supabase_orm._async import SupabaseModel
 
 from .conftest import FakeResponse
 

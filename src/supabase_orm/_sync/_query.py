@@ -1,4 +1,7 @@
-"""Chainable async QueryBuilder.
+# DO NOT EDIT — generated from src/supabase_orm/_async/_query.py by scripts/gen_sync.py.
+# Run `python scripts/gen_sync.py` (or rebuild the package) to regenerate.
+
+"""Chainable QueryBuilder.
 
 The typed operator surface lives on ``_Filterable`` — a mixin shared by both
 ``QueryBuilder`` (mutates a postgrest builder) and ``_PredicateGroup``
@@ -11,7 +14,7 @@ Don't reuse a builder after a terminal call; create a fresh one off ``Model.quer
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Iterator, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Callable, Generic, Self, TypeVar, cast, overload
 
@@ -41,15 +44,15 @@ _ITER_FORBIDDEN_OPS = frozenset({_Op.ORDER, _Op.LIMIT, _Op.OFFSET, _Op.RANGE})
 
 from pydantic import BaseModel, TypeAdapter
 
-from ._client import get_client
-from ._exceptions import (
+from .._exceptions import (
     SupabaseORMDoesNotExist,
     SupabaseORMMultipleObjectsReturned,
     SupabaseORMUsageError,
 )
-from ._filters import apply_op, compile_predicate
-from ._predicates import Column, Order, Predicate
-from ._serializers import serialize
+from .._filters import apply_op, compile_predicate
+from .._predicates import Column, Order, Predicate
+from .._serializers import serialize
+from ._client import get_client
 
 if TYPE_CHECKING:
     from ._base import SupabaseModel
@@ -255,13 +258,13 @@ def _coerce_order(spec: "str | Column | Order") -> Order:
 
 
 class QueryBuilder(_Filterable, Generic[T]):
-    """Async chainable query builder.
+    """Chainable query builder.
 
     Build:        ``Pet.query.eq("species", "cat").gte("age", 3).limit(10)``
     Terminate:    ``.all()`` / ``.first()`` / ``.one()`` / ``.maybe_one()``
                   / ``.count()`` / ``.all_with_count()`` / ``.delete()``
                   / ``.update(...)``
-    Escape hatch: ``.raw()`` returns the underlying postgrest async builder.
+    Escape hatch: ``.raw()`` returns the underlying postgrest builder.
     """
 
     _model: type[T]
@@ -299,7 +302,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         PostgREST's ``match`` is multi-column by design — it has no single
         ``column`` argument. Use it for compound equality filters::
 
-            await Pet.query.match({"species": "cat", "adopted": False}).all()
+            Pet.query.match({"species": "cat", "adopted": False}).all()
 
         Equivalent to chaining ``.eq()`` per pair. Not available inside
         ``or_()`` / ``not_()`` (no predicate-string form).
@@ -351,7 +354,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         **Same-table SupabaseModel** — narrows the wire ``select`` to the
         target's ``__select__`` and validates against it::
 
-            await Pet.query.eq("adopted", False).as_(PetMini).all()
+            Pet.query.eq("adopted", False).as_(PetMini).all()
             # Wire: ?select=id,name → list[PetMini]
 
         **Plain BaseModel** — validation only, wire ``select`` unchanged.
@@ -361,7 +364,7 @@ class QueryBuilder(_Filterable, Generic[T]):
                 id: UUID
                 name: str
 
-            await Pet.query.fts("bio", "fluffy").as_(PetCard).all()
+            Pet.query.fts("bio", "fluffy").as_(PetCard).all()
             # Wire: ?select=<full Pet> → list[PetCard]
 
         Cross-table SupabaseModel targets raise — almost always a mistake.
@@ -391,7 +394,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         self._validator = _adapter_for(target)
         return cast("QueryBuilder[U]", self)
 
-    async def values(self, *columns: str) -> list[dict[str, Any]]:
+    def values(self, *columns: str) -> list[dict[str, Any]]:
         """Run the query with an ad-hoc column projection. Returns raw dicts.
 
         No Pydantic validation, no autocomplete — caller deals with
@@ -399,18 +402,18 @@ class QueryBuilder(_Filterable, Generic[T]):
         defining a projection model would be overkill. ``columns`` may include
         PostgREST embed syntax (e.g. ``"pets(id,name)"``)::
 
-            rows = await Pet.query.eq("adopted", False).values("id", "name")
+            rows = Pet.query.eq("adopted", False).values("id", "name")
         """
         if not columns:
             raise SupabaseORMUsageError(".values() requires at least one column.")
         b = self._make_select(select=",".join(columns))
-        resp = await b.execute()
+        resp = b.execute()
         return resp.data or []
 
     # ─── Escape hatch ──────────────────────────────────────────────────────
 
     def raw(self) -> Any:
-        """Return the underlying postgrest async builder for ops we don't model.
+        """Return the underlying postgrest builder for ops we don't model.
 
         Resolves the client at call time, so the builder is bound to the
         current ContextVar — pair with ``use_client()`` in a request
@@ -481,34 +484,34 @@ class QueryBuilder(_Filterable, Generic[T]):
 
     # ─── Read terminals ────────────────────────────────────────────────────
 
-    async def all(self) -> list[T]:
-        resp = await self._make_select().execute()
+    def all(self) -> list[T]:
+        resp = self._make_select().execute()
         return self._validate_rows(resp.data or [])
 
-    async def all_with_count(self) -> tuple[list[T], int]:
+    def all_with_count(self) -> tuple[list[T], int]:
         """Run the query and ask PostgREST for an exact total in one round-trip.
 
         Useful for paginated endpoints — saves a separate ``.count()`` call.
         ``count="exact"`` is computed on the FILTERED row set, ignoring
         ``limit``/``offset``, which is the standard pagination semantics.
         """
-        resp = await self._make_select(count="exact").execute()
+        resp = self._make_select(count="exact").execute()
         rows = self._validate_rows(resp.data or [])
         return rows, getattr(resp, "count", None) or 0
 
-    async def _take(self, n: int) -> list[T]:
+    def _take(self, n: int) -> list[T]:
         """Run the query with an ad-hoc ``.limit(n)`` without polluting
         the op log — so ``first()``/``one()``/``maybe_one()`` are
         idempotent on repeat calls."""
-        resp = await self._make_select().limit(n).execute()
+        resp = self._make_select().limit(n).execute()
         return self._validate_rows(resp.data or [])
 
-    async def first(self) -> T | None:
-        rows = await self._take(1)
+    def first(self) -> T | None:
+        rows = self._take(1)
         return rows[0] if rows else None
 
-    async def one(self) -> T:
-        rows = await self._take(2)
+    def one(self) -> T:
+        rows = self._take(2)
         if not rows:
             raise SupabaseORMDoesNotExist(f"No {self._model.__name__} matched query")
         if len(rows) > 1:
@@ -517,8 +520,8 @@ class QueryBuilder(_Filterable, Generic[T]):
             )
         return rows[0]
 
-    async def maybe_one(self) -> T | None:
-        rows = await self._take(2)
+    def maybe_one(self) -> T | None:
+        rows = self._take(2)
         if not rows:
             return None
         if len(rows) > 1:
@@ -528,21 +531,21 @@ class QueryBuilder(_Filterable, Generic[T]):
             )
         return rows[0]
 
-    async def count(self) -> int:
+    def count(self) -> int:
         """Count matching rows on a fresh head-only request, replaying the
         recorded op log so filters (including relation filters) are honored."""
         b = self._make_select(select="*", count="exact", head=True)
-        resp = await b.execute()
+        resp = b.execute()
         return getattr(resp, "count", None) or 0
 
-    def iter(self, *, batch_size: int = 1000) -> AsyncIterator[T]:
+    def iter(self, *, batch_size: int = 1000) -> Iterator[T]:
         """Yield every matching row using PK keyset pagination.
 
         Safe and constant-time at any table size — each batch is a single
         ``WHERE pk > :cursor ORDER BY pk LIMIT :batch_size`` request that
         uses the PK index, so per-batch cost is independent of position::
 
-            async for pet in Pet.query.eq("species", "cat").iter():
+            for pet in Pet.query.eq("species", "cat").iter():
                 process(pet)
 
         Filters compose normally (chain ``.eq()`` / predicates / etc. before
@@ -570,14 +573,14 @@ class QueryBuilder(_Filterable, Generic[T]):
                 )
         return self._iter_impl(pk, batch_size)
 
-    async def _iter_impl(self, pk: str, batch_size: int) -> AsyncIterator[T]:
+    def _iter_impl(self, pk: str, batch_size: int) -> Iterator[T]:
         cursor: Any = None
         while True:
             b = self._make_select()
             if cursor is not None:
                 b = b.gt(pk, serialize(cursor))
             b = b.order(pk, desc=False).limit(batch_size)
-            resp = await b.execute()
+            resp = b.execute()
             data = resp.data or []
             if not data:
                 return
@@ -592,7 +595,7 @@ class QueryBuilder(_Filterable, Generic[T]):
 
     # ─── Write terminals ───────────────────────────────────────────────────
 
-    async def delete(self, *, allow_unfiltered: bool = False) -> list[T]:
+    def delete(self, *, allow_unfiltered: bool = False) -> list[T]:
         """Bulk-delete every matching row. Returns the deleted rows.
 
         Raises ``SupabaseORMUsageError`` if no filter has been chained
@@ -607,10 +610,10 @@ class QueryBuilder(_Filterable, Generic[T]):
         b = get_client().table(self._model.__table__).delete()
         b = self._replay(b)
         b = self._apply_relation_filters_on(b)
-        resp = await b.execute()
+        resp = b.execute()
         return self._validate_rows(resp.data or [])
 
-    async def update(self, *, allow_unfiltered: bool = False, **values: Any) -> list[T]:
+    def update(self, *, allow_unfiltered: bool = False, **values: Any) -> list[T]:
         """Bulk-update every matching row. Returns the updated rows.
 
         Raises ``SupabaseORMUsageError`` if no filter has been chained
@@ -629,7 +632,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         b = get_client().table(self._model.__table__).update(payload)
         b = self._replay(b)
         b = self._apply_relation_filters_on(b)
-        resp = await b.execute()
+        resp = b.execute()
         return self._validate_rows(resp.data or [])
 
     # ─── Helpers ───────────────────────────────────────────────────────────

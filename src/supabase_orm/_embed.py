@@ -35,10 +35,11 @@ class Relation:
 
 
 def _is_supabase_model(tp: Any) -> bool:
-    # Late import to avoid cycle with _base.
-    from ._base import SupabaseModel
-
-    return isinstance(tp, type) and issubclass(tp, SupabaseModel)
+    # Duck-typed marker rather than ``issubclass`` so the shared embed
+    # module doesn't reach into one specific impl tree — the async and
+    # sync ``SupabaseModel`` classes both set ``__supabase_model__`` on
+    # the base via ``_base.py``.
+    return isinstance(tp, type) and getattr(tp, "__supabase_model__", False)
 
 
 def _unwrap_optional(tp: Any) -> Any:

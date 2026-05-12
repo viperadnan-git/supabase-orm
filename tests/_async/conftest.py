@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from supabase_orm import set_client
+from supabase_orm._async._client import set_client
 
 
 class FakeResponse:

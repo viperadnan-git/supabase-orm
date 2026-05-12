@@ -25,13 +25,13 @@ from typing import Any, ClassVar, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from .._embed import Relation, build_select, collect_relations
+from .._exceptions import SupabaseORMDoesNotExist, SupabaseORMUsageError
+from .._filters import compile_value
+from .._predicates import _FieldsAccess
+from .._serializers import serialize
 from ._client import get_client
-from ._embed import Relation, build_select, collect_relations
-from ._exceptions import SupabaseORMDoesNotExist, SupabaseORMUsageError
-from ._filters import compile_value
-from ._predicates import _FieldsAccess
 from ._query import QueryBuilder
-from ._serializers import serialize
 
 _T = TypeVar("_T", bound="SupabaseModel")
 
@@ -91,6 +91,11 @@ class SupabaseModel(BaseModel):
         validate_assignment=True,
         extra="ignore",
     )
+
+    # Duck-typed marker read by shared modules (``_embed``) that need to
+    # detect SupabaseModel subclasses without importing from either of
+    # the two impl trees.
+    __supabase_model__: ClassVar[bool] = True
 
     __table__: ClassVar[str] = ""
     __pk__: ClassVar[str] = "id"
