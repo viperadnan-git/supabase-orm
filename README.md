@@ -16,6 +16,8 @@
 
 - **Typed predicate expressions.** `Pet.f.age >= 5` builds a composable `Predicate`. Combine with `|` / `&` / `~` and pass to `.or_()` / `.not_()`. Reads as boolean logic, type-checks as expressions.
 
+- **Keyset iteration that scales.** `async for pet in Pet.query.eq(...).iter():` paginates by PK with constant-time-per-batch and no offset cliff. Works on tables of any size; race-safe under concurrent inserts and deletes.
+
 - **Pydantic v2 throughout.** Your model *is* the row schema, the response schema, and the request body schema. No DTO layer.
 
 - **Async-first.** Built for `asyncio` and FastAPI — every terminal call is `await`-able, every chain is a fresh builder.
@@ -28,7 +30,7 @@
 
 - **Opt-in foot-gun guards.** Unfiltered bulk `delete()` / `update()` raise unless you pass `allow_unfiltered=True`.
 
-- **Tested both ways.** 200+ mock tests cover the wire contract (every operator, every serializer, every shorthand, every predicate composition). 50+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
+- **Tested both ways.** 230+ mock tests cover the wire contract (every operator, every serializer, every shorthand, predicate composition, keyset iteration). 60+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
 
 ---
 
@@ -109,11 +111,12 @@ class Pet(SupabaseModel, table="pets"):
 
 ### Class kwargs
 
-| Kwarg    | Default | What it does                                                    |
-|----------|---------|-----------------------------------------------------------------|
-| `table`  | —       | PostgREST table or view name. **Required.**                     |
-| `pk`     | `"id"`  | Primary-key field name. Used by `get()`, `save()`, `delete()`.  |
-| `select` | auto    | Override the auto-derived `select=` string. Escape hatch only.  |
+| Kwarg         | Default          | What it does                                                                |
+|---------------|------------------|-----------------------------------------------------------------------------|
+| `table`       | —                | PostgREST table or view name. **Required.**                                 |
+| `pk`          | `"id"`           | Primary-key field name. Used by `get()`, `save()`, `delete()`, `iter()`.    |
+| `select`      | auto             | Override the auto-derived `select=` string. Escape hatch only.              |
+| `query_class` | `QueryBuilder`   | Custom `QueryBuilder` subclass for `.query`. MRO-inherited via base models. |
 
 ### Relations
 
@@ -138,23 +141,57 @@ class PetWithOwner(SupabaseModel, table="pets"):
 
 ### Lean projections
 
-Two models can point at the same table for full-detail vs. trimmed views:
+Two models on the same table — full-detail vs. trimmed view. Just query the lean one directly when its fields are enough:
 
 ```python
 class Pet(SupabaseModel, table="pets"):
     id: UUID
     name: str
     species: str
+    bio: str           # heavy column you don't always need
     created_at: datetime
 
 class PetMini(SupabaseModel, table="pets"):
     id: UUID
     name: str
 
-# Build the full query, then rebind:
-mini_rows = await Pet.query.eq("adopted", False).as_(PetMini).all()
-# → list[PetMini]
+# Half the wire bytes, fewer Pydantic fields to validate:
+await PetMini.query.eq("species", "cat").all()
 ```
+
+For huge result sets, pair with `.iter()` so the lean projection runs per batch:
+
+```python
+async for mini in PetMini.query.iter(batch_size=5000):
+    process(mini)
+```
+
+### `.as_(target)` — rebind the response shape
+
+Use `.as_()` when you need to **filter on source columns the lean model doesn't expose**, or to switch the response shape conditionally without rebuilding the chain. Two modes:
+
+**Same-table SupabaseModel** — narrows the wire `select` AND validates against the target:
+
+```python
+# Wire: ?select=id,name  →  list[PetMini]
+await Pet.query.eq("adopted", False).as_(PetMini).all()
+```
+
+**Plain Pydantic BaseModel** — validation only, wire `select` unchanged. The chain keeps using the source model's columns and predicates:
+
+```python
+from pydantic import BaseModel
+
+class PetCard(BaseModel):
+    id: UUID
+    name: str
+
+# Filter on `bio` (only on Pet) but validate as PetCard:
+await Pet.query.fts("bio", "fluffy").as_(PetCard).all()
+# → list[PetCard], wire still selects all of Pet's columns
+```
+
+If a same-table SupabaseModel target works, prefer it — you get the wire-narrowing optimization. Reach for the plain BaseModel form only when the lean schema doesn't have all the columns you need to filter on.
 
 ---
 
@@ -170,6 +207,7 @@ mini_rows = await Pet.query.eq("adopted", False).as_(PetMini).all()
 | `.maybe_one()`        | `T \| None`            | At most one row. Raises if >1.                                          |
 | `.count()`            | `int`                  | Head-only request with `count="exact"`.                                 |
 | `.all_with_count()`   | `tuple[list[T], int]`  | Rows + filtered total in one round-trip (for paginated endpoints).      |
+| `.iter(batch_size=)`  | `AsyncIterator[T]`     | Stream every matching row via PK keyset pagination. Scales to any size. |
 | `.values(*cols)`      | `list[dict]`           | Ad-hoc projection, raw dicts, no Pydantic validation.                   |
 | `.raw()`              | postgrest builder      | Escape hatch.                                                           |
 
@@ -275,10 +313,41 @@ await Pet.query.match({"species": "cat", "adopted": False}).all()
 
 ### Ordering & pagination
 
+`order_by()` accepts strings (`"-col"` for descending) or typed `Pet.f.<col>.asc()` / `.desc()`. The typed form unlocks `nulls="first"` / `"last"` and gets autocomplete + column-existence checks.
+
 ```python
+# String shorthand
 await Pet.query.order_by("-created_at", "name").limit(20).offset(40).all()
-await Pet.query.range(0, 9).all()       # PostgREST-style inclusive range
+await Pet.query.range(0, 9).all()                           # inclusive range
+
+# Typed form — autocomplete on Pet.f, nulls position support
+await Pet.query.order_by(Pet.f.created_at.desc()).all()
+await Pet.query.order_by(Pet.f.last_login.desc(nulls="last")).all()
+
+# Mix freely
+await Pet.query.order_by("species", Pet.f.amount.desc()).all()
 ```
+
+Typos in either form raise `AttributeError` at call time — never silent server errors.
+
+### Iteration over large result sets
+
+`.iter()` streams every matching row using **PK keyset pagination** — `WHERE pk > :cursor ORDER BY pk LIMIT :batch_size` per batch. Constant time per batch regardless of position; scales to billions of rows.
+
+```python
+async for pet in Pet.query.eq("species", "cat").iter():
+    process(pet)
+
+# Tune batch size for the memory / round-trip tradeoff:
+async for row in BigTable.query.iter(batch_size=5000):
+    ...
+
+# Compose with projections to narrow wire bytes per batch:
+async for mini in Pet.query.eq("species", "cat").as_(PetMini).iter():
+    ...
+```
+
+`.iter()` owns ordering and pagination — chaining `.order_by()` / `.limit()` / `.offset()` / `.range()` before it raises `SupabaseORMUsageError`. Race-safe under concurrent inserts (new rows with `pk > cursor` get picked up) and deletes (deleted rows simply don't appear).
 
 ### Pagination with total
 
@@ -470,6 +539,40 @@ class Money:
     def __init__(self, cents: int): self.cents = cents
 
 register_serializer(Money, lambda v: v.cents)
+```
+
+### Custom `QueryBuilder` methods
+
+Subclass `QueryBuilder` to add your own chainable methods, then opt in either per-model or project-wide.
+
+```python
+from supabase_orm import QueryBuilder, SupabaseModel
+
+class PaginatedQB(QueryBuilder):
+    async def paginate(self, *, page: int, per_page: int):
+        return await self.range(
+            page * per_page, (page + 1) * per_page - 1
+        ).all_with_count()
+```
+
+**Project-wide** — define a base model once, every subclass inherits via MRO:
+
+```python
+class _AppModel(SupabaseModel):
+    __query_class__ = PaginatedQB
+
+class User(_AppModel, table="users"):  # gets PaginatedQB automatically
+    id: UUID
+    email: str
+
+rows, total = await User.query.eq("is_active", True).paginate(page=0, per_page=20)
+```
+
+**Per-model** — opt in inline, no base class needed:
+
+```python
+class Audit(SupabaseModel, table="audit_log", query_class=PaginatedQB):
+    ...
 ```
 
 ---

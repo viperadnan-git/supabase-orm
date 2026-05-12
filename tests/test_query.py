@@ -304,6 +304,98 @@ async def test_as_different_table_raises(fake_client):
         User.query.as_(OtherTable)  # type: ignore[type-var]
 
 
+# ─── as_(plain BaseModel) — validation-only rebinding ────────────────────
+
+
+async def test_as_plain_basemodel_validation_only(fake_client):
+    """Plain BaseModel target: wire ``select`` stays the source's, but
+    rows come back as the BaseModel instances."""
+    from pydantic import BaseModel
+
+    class UserCard(BaseModel):
+        id: UUID
+        email: str
+
+    uid = uuid4()
+    fake_client.queue(
+        FakeResponse(data=[{"id": str(uid), "email": "a@b.c", "is_active": True}])
+    )
+    rows = await User.query.eq("is_active", True).as_(UserCard).all()
+
+    # Validated as the plain BaseModel — not the source User.
+    assert isinstance(rows[0], UserCard)
+    assert not isinstance(rows[0], User)
+    assert rows[0].id == uid
+
+    # Wire select stayed the source's full string (no narrowing).
+    sel = next(c for c in fake_client.builders[0].calls if c[0] == "select")
+    assert sel[1] == ("id,email,is_active",)
+
+
+async def test_as_plain_basemodel_keeps_source_predicate_validation(fake_client):
+    """After as_(plain BaseModel), the source still owns predicate column
+    validation — you can filter on source columns the target doesn't have."""
+    from pydantic import BaseModel
+
+    class UserCard(BaseModel):
+        id: UUID  # only one field — no email, no is_active
+
+    fake_client.queue(FakeResponse(data=[]))
+    # Filter on `is_active` — exists on User (source), not on UserCard.
+    # Should not raise, because predicates validate against source.
+    await User.query.eq("is_active", True).as_(UserCard).all()
+    calls = fake_client.builders[0].calls
+    assert ("eq", ("is_active", True), {}) in calls
+
+
+async def test_as_supabase_model_same_table_still_narrows_wire(fake_client):
+    """Sanity: SupabaseModel same-table target keeps the existing narrow-
+    wire behavior (full rebind, not validation-only)."""
+    uid = uuid4()
+    fake_client.queue(FakeResponse(data=[{"id": str(uid), "email": "a@b.c"}]))
+    rows = await User.query.eq("is_active", True).as_(UserMini).all()
+    assert isinstance(rows[0], UserMini)
+    sel = next(c for c in fake_client.builders[-1].calls if c[0] == "select")
+    assert sel[1] == ("id,email",)  # UserMini's narrower select
+
+
+async def test_as_rejects_non_basemodel():
+    """Non-BaseModel targets fail loudly at call time."""
+    with pytest.raises(SupabaseORMUsageError, match="Pydantic BaseModel"):
+        User.query.as_(dict)  # type: ignore[type-var]
+
+
+async def test_as_plain_basemodel_iter_works(fake_client):
+    """iter() must keep working after as_(plain BaseModel) — keyset uses
+    the source's PK from the raw dict (the source's __select__ always
+    includes the PK column)."""
+    from pydantic import BaseModel
+
+    class UserCard(BaseModel):
+        id: UUID
+        email: str
+
+    a, b = uuid4(), uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[
+                {"id": str(a), "email": "A", "is_active": True},
+                {"id": str(b), "email": "B", "is_active": True},
+            ]
+        ),
+        FakeResponse(data=[]),
+    )
+    out = [u async for u in User.query.as_(UserCard).iter(batch_size=2)]
+    assert len(out) == 2
+    assert all(isinstance(u, UserCard) for u in out)
+
+    # Cursor in the second batch must be the last seen PK — read from the
+    # dict, not the validated UserCard object.
+    second_batch_calls = fake_client.builders[1].calls
+    gt_calls = [c for c in second_batch_calls if c[0] == "gt"]
+    assert gt_calls and gt_calls[0][1] == ("id", str(b))
+
+
 # ─── values ──────────────────────────────────────────────────────────────
 
 

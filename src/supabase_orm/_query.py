@@ -11,7 +11,7 @@ Don't reuse a builder after a terminal call; create a fresh one off ``Model.quer
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Callable, Generic, Self, TypeVar, cast, overload
 
@@ -36,6 +36,11 @@ class _Op(StrEnum):
 # delete/update foot-gun guard.
 _FILTERING_OPS = frozenset({_Op.OP, _Op.OR, _Op.MATCH})
 
+# Op kinds that conflict with iter() — iter owns ordering and pagination.
+_ITER_FORBIDDEN_OPS = frozenset({_Op.ORDER, _Op.LIMIT, _Op.OFFSET, _Op.RANGE})
+
+from pydantic import BaseModel, TypeAdapter
+
 from ._client import get_client
 from ._exceptions import (
     SupabaseORMDoesNotExist,
@@ -49,8 +54,23 @@ from ._serializers import serialize
 if TYPE_CHECKING:
     from ._base import SupabaseModel
 
-T = TypeVar("T", bound="SupabaseModel")
-U = TypeVar("U", bound="SupabaseModel")
+# Result-row type. Bound to BaseModel so ``as_()`` can rebind the validator
+# to any Pydantic model (not just SupabaseModel subclasses).
+T = TypeVar("T", bound=BaseModel)
+U = TypeVar("U", bound=BaseModel)
+
+
+# Cache ``TypeAdapter(list[Model])`` per target — adapter creation is non-trivial
+# and ``as_()`` is hot.
+_BASEMODEL_ADAPTERS: dict[type[BaseModel], TypeAdapter] = {}
+
+
+def _adapter_for(model: type[BaseModel]) -> TypeAdapter:
+    a = _BASEMODEL_ADAPTERS.get(model)
+    if a is None:
+        a = TypeAdapter(list[model])
+        _BASEMODEL_ADAPTERS[model] = a
+    return a
 
 
 # ─── Filter mixin (typed operator surface) ────────────────────────────────
@@ -249,6 +269,9 @@ class QueryBuilder(_Filterable, Generic[T]):
     def __init__(self, model: type[T]) -> None:
         self._model = model
         self._select: str = model.__select__
+        # When set by ``as_(plain BaseModel)``, overrides row validation —
+        # source still owns table/predicates/select/iter PK.
+        self._validator: TypeAdapter | None = None
         # Chain calls only append here. Terminals resolve ``get_client()``
         # fresh and replay this log — so chains built before a
         # ``use_client()`` block still see the current binding at execute time.
@@ -320,33 +343,52 @@ class QueryBuilder(_Filterable, Generic[T]):
 
     # ─── Projection / rebind ───────────────────────────────────────────────
 
-    def as_(self, model: type[U]) -> "QueryBuilder[U]":
-        """Rebind the query to validate rows against ``model`` instead.
+    def as_(self, target: type[U]) -> "QueryBuilder[U]":
+        """Rebind the response shape. ``target`` is any Pydantic ``BaseModel``.
 
-        Both classes must point to the same ``__table__``. Useful for swapping
-        between a "full" model and a leaner projection that share the table::
+        Two modes, picked by what you pass:
 
-            class Pet(SupabaseModel, table="pets"):
-                id: UUID
-                name: str
-                species: str
-                created_at: datetime
-
-            class PetMini(SupabaseModel, table="pets"):
-                id: UUID
-                name: str
+        **Same-table SupabaseModel** — narrows the wire ``select`` to the
+        target's ``__select__`` and validates against it::
 
             await Pet.query.eq("adopted", False).as_(PetMini).all()
-            # → list[PetMini]
+            # Wire: ?select=id,name → list[PetMini]
+
+        **Plain BaseModel** — validation only, wire ``select`` unchanged.
+        Use when filtering on source columns the lean target doesn't expose::
+
+            class PetCard(BaseModel):
+                id: UUID
+                name: str
+
+            await Pet.query.fts("bio", "fluffy").as_(PetCard).all()
+            # Wire: ?select=<full Pet> → list[PetCard]
+
+        Cross-table SupabaseModel targets raise — almost always a mistake.
         """
-        if model.__table__ != self._model.__table__:
+        # Late import — _base imports from _query, so we can't import at
+        # module load.
+        from ._base import SupabaseModel
+
+        if not (isinstance(target, type) and issubclass(target, BaseModel)):
             raise SupabaseORMUsageError(
-                f"as_({model.__name__}): different table "
-                f"({model.__table__!r} != {self._model.__table__!r}). "
-                "Both models must point at the same __table__."
+                f"as_({target!r}) requires a Pydantic BaseModel subclass."
             )
-        self._model = cast("type[T]", model)
-        self._select = model.__select__
+
+        if issubclass(target, SupabaseModel):
+            if target.__table__ != self._model.__table__:
+                raise SupabaseORMUsageError(
+                    f"as_({target.__name__}): different table "
+                    f"({target.__table__!r} != {self._model.__table__!r}). "
+                    "Either point both SupabaseModels at the same __table__, "
+                    "or pass a plain BaseModel for validation-only rebinding."
+                )
+            self._model = cast("type[T]", target)
+            self._select = target.__select__
+            self._validator = None
+            return cast("QueryBuilder[U]", self)
+
+        self._validator = _adapter_for(target)
         return cast("QueryBuilder[U]", self)
 
     async def values(self, *columns: str) -> list[dict[str, Any]]:
@@ -493,6 +535,61 @@ class QueryBuilder(_Filterable, Generic[T]):
         resp = await b.execute()
         return getattr(resp, "count", None) or 0
 
+    def iter(self, *, batch_size: int = 1000) -> AsyncIterator[T]:
+        """Yield every matching row using PK keyset pagination.
+
+        Safe and constant-time at any table size — each batch is a single
+        ``WHERE pk > :cursor ORDER BY pk LIMIT :batch_size`` request that
+        uses the PK index, so per-batch cost is independent of position::
+
+            async for pet in Pet.query.eq("species", "cat").iter():
+                process(pet)
+
+        Filters compose normally (chain ``.eq()`` / predicates / etc. before
+        ``.iter()``). ``iter()`` owns ordering and pagination, so chaining
+        ``.order_by()`` / ``.limit()`` / ``.offset()`` / ``.range()``
+        before it raises ``SupabaseORMUsageError``.
+
+        Snapshot semantics are loose: rows inserted with ``pk > cursor``
+        after iteration started will be picked up; rows with ``pk <
+        cursor`` will be missed. With monotonic PKs (UUIDv7, serial,
+        sequence) the latter can't happen. Race-safe for concurrent
+        deletes (the deleted row simply doesn't appear).
+        """
+        model = self._model
+        pk = model.__pk__
+        if pk not in model.model_fields:
+            raise SupabaseORMUsageError(
+                f"{model.__name__}.iter() needs __pk__ {pk!r} to be a model field."
+            )
+        for op in self._ops:
+            if op[0] in _ITER_FORBIDDEN_OPS:
+                raise SupabaseORMUsageError(
+                    f"iter() owns ordering and pagination — drop the chained "
+                    f".{op[0].value}() call."
+                )
+        return self._iter_impl(pk, batch_size)
+
+    async def _iter_impl(self, pk: str, batch_size: int) -> AsyncIterator[T]:
+        cursor: Any = None
+        while True:
+            b = self._make_select()
+            if cursor is not None:
+                b = b.gt(pk, serialize(cursor))
+            b = b.order(pk, desc=False).limit(batch_size)
+            resp = await b.execute()
+            data = resp.data or []
+            if not data:
+                return
+            rows = self._validate_rows(data)
+            for row in rows:
+                yield row
+            if len(data) < batch_size:
+                return
+            # Cursor from raw dict, not the validated row — works when
+            # ``as_(plain BaseModel)`` strips the PK from the row type.
+            cursor = data[-1][pk]
+
     # ─── Write terminals ───────────────────────────────────────────────────
 
     async def delete(self, *, allow_unfiltered: bool = False) -> list[T]:
@@ -538,6 +635,8 @@ class QueryBuilder(_Filterable, Generic[T]):
     # ─── Helpers ───────────────────────────────────────────────────────────
 
     def _validate_rows(self, data: list[dict[str, Any]]) -> list[T]:
+        if self._validator is not None:
+            return self._validator.validate_python(data)
         adapter = self._model.__list_adapter__
         if adapter is not None:
             return adapter.validate_python(data)

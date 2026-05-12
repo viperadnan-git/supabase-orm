@@ -203,3 +203,24 @@ async def test_order_by_string_and_typed_compose(clean):
     # Each species group must be amount-descending internally.
     for group in species_groups:
         assert group == sorted(group, reverse=True)
+
+
+# ─── as_(plain BaseModel) — validation-only ──────────────────────────────
+
+
+async def test_as_plain_basemodel_round_trip(clean):
+    """Real PostgREST: as_(plain BaseModel) returns the BaseModel instances,
+    while filters continue using source columns."""
+    from pydantic import BaseModel
+
+    class PetCard(BaseModel):
+        id: str  # plain str ok — pydantic coerces uuid string
+        name: str
+
+    pets = await _seed_pets()
+    cards = await Pet.query.in_("id", [p.id for p in pets]).as_(PetCard).all()
+    assert len(cards) == len(pets)
+    assert all(isinstance(c, PetCard) for c in cards)
+    # Names round-trip correctly even though PetCard doesn't declare
+    # species/adopted/tags etc.
+    assert {c.name for c in cards} == {p.name for p in pets}
