@@ -282,3 +282,98 @@ async def test_predicate_or_composes_with_chain_filters(fake_client):
         ("order", ("age",), {"desc": True}),
         ("limit", (10,), {}),
     ]
+
+
+# ─── Order / .asc() / .desc() ────────────────────────────────────────────
+
+
+def test_column_asc_returns_order():
+    from supabase_orm import Order
+
+    o = Row.f.age.asc()
+    assert isinstance(o, Order)
+    assert o.column == "age"
+    assert o.desc is False
+    assert o.nulls is None
+
+
+def test_column_desc_returns_order():
+    o = Row.f.age.desc()
+    assert o.column == "age" and o.desc is True
+
+
+def test_order_with_nulls_position():
+    asc = Row.f.created_at.asc(nulls="last")
+    desc = Row.f.created_at.desc(nulls="first")
+    assert asc.nulls == "last"
+    assert desc.nulls == "first"
+
+
+def test_order_parse_handles_dash_prefix_and_whitespace():
+    from supabase_orm import Order
+
+    assert Order.parse("name") == Order("name", desc=False)
+    assert Order.parse("-name") == Order("name", desc=True)
+    assert Order.parse("  -name  ") == Order("name", desc=True)
+
+
+async def test_order_by_string_form_unchanged(fake_client):
+    """The ``"-col"`` shorthand still works exactly as before."""
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.order_by("-age", "name").all()
+    orders = [c for c in fake_client.builders[0].calls if c[0] == "order"]
+    assert orders == [
+        ("order", ("age",), {"desc": True}),
+        ("order", ("name",), {"desc": False}),
+    ]
+
+
+async def test_order_by_typed_column_defaults_to_asc(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.order_by(Row.f.age).all()
+    orders = [c for c in fake_client.builders[0].calls if c[0] == "order"]
+    assert orders == [("order", ("age",), {"desc": False})]
+
+
+async def test_order_by_typed_desc(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.order_by(Row.f.age.desc()).all()
+    orders = [c for c in fake_client.builders[0].calls if c[0] == "order"]
+    assert orders == [("order", ("age",), {"desc": True})]
+
+
+async def test_order_by_with_nulls_position(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.order_by(
+        Row.f.created_at.desc(nulls="last"),
+        Row.f.age.asc(nulls="first"),
+    ).all()
+    orders = [c for c in fake_client.builders[0].calls if c[0] == "order"]
+    assert orders == [
+        ("order", ("created_at",), {"desc": True, "nullsfirst": False}),
+        ("order", ("age",), {"desc": False, "nullsfirst": True}),
+    ]
+
+
+async def test_order_by_mixes_string_and_typed_forms(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.order_by("-age", Row.f.name).all()
+    orders = [c for c in fake_client.builders[0].calls if c[0] == "order"]
+    assert orders == [
+        ("order", ("age",), {"desc": True}),
+        ("order", ("name",), {"desc": False}),
+    ]
+
+
+async def test_order_by_validates_string_column():
+    """Typos in the string form must surface at call time, not at server time."""
+    with pytest.raises(AttributeError, match="no column 'nope'"):
+        Row.query.order_by("-nope")
+
+
+async def test_order_by_validates_order_column():
+    """Even when wrapped in Order — validate against model fields."""
+    from supabase_orm import Order
+
+    with pytest.raises(AttributeError, match="no column 'nope'"):
+        Row.query.order_by(Order("nope", desc=True))

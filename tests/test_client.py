@@ -1,4 +1,4 @@
-"""Client lifecycle: ContextVar isolation, use_client, set_auth."""
+"""Client lifecycle: ContextVar isolation, use_client."""
 
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ import pytest
 from supabase_orm import (
     SupabaseORMUsageError,
     get_client,
-    set_auth,
     set_client,
     use_client,
 )
-from supabase_orm._client import _client, _default_key
+from supabase_orm._client import _client
 
 
 def test_get_client_without_init_raises():
@@ -85,82 +84,6 @@ async def test_use_client_restores_even_on_exception():
         set_client(None)
 
 
-# ─── set_auth ────────────────────────────────────────────────────────────
-
-
-class _FakePostgrest:
-    def __init__(self):
-        self.token: str | None = None
-
-    def auth(self, token: str) -> None:
-        self.token = token
-
-
-class _FakeAuthClient:
-    def __init__(self):
-        self.postgrest = _FakePostgrest()
-
-
-def test_set_auth_applies_jwt_to_postgrest():
-    c = _FakeAuthClient()
-    set_client(c)  # type: ignore[arg-type]
-    try:
-        set_auth("user-jwt-abc")
-        assert c.postgrest.token == "user-jwt-abc"
-    finally:
-        set_client(None)
-
-
-def test_set_auth_none_restores_default_key():
-    c = _FakeAuthClient()
-    set_client(c)  # type: ignore[arg-type]
-    key_token = _default_key.set("anon-key-xyz")
-    try:
-        set_auth("user-jwt")
-        assert c.postgrest.token == "user-jwt"
-        set_auth(None)
-        assert c.postgrest.token == "anon-key-xyz"
-    finally:
-        _default_key.reset(key_token)
-        set_client(None)
-
-
-def test_set_auth_none_without_default_key_raises():
-    c = _FakeAuthClient()
-    # Run in a fresh context — the integration suite's session lifespan
-    # may have set _default_key elsewhere; we want to assert behavior
-    # when no key is recorded.
-    from contextvars import copy_context
-
-    def _body():
-        _default_key.set(None)
-        set_client(c)  # type: ignore[arg-type]
-        with pytest.raises(SupabaseORMUsageError, match="default key"):
-            set_auth(None)
-
-    copy_context().run(_body)
-
-
-async def test_set_auth_isolated_across_requests():
-    """Two concurrent tasks each running their own use_client + set_auth
-    must not see each other's JWT."""
-    set_client(_FakeAuthClient())  # type: ignore[arg-type]
-
-    async def request(jwt: str) -> str:
-        async with use_client(_FakeAuthClient()):  # type: ignore[arg-type]
-            set_auth(jwt)
-            await asyncio.sleep(0)  # let the other task run between set & read
-            return get_client().postgrest.token  # type: ignore[attr-defined]
-
-    try:
-        results = await asyncio.gather(
-            request("jwt-alice"), request("jwt-bob"), request("jwt-carol")
-        )
-        assert results == ["jwt-alice", "jwt-bob", "jwt-carol"]
-    finally:
-        set_client(None)
-
-
 # ─── ContextVar semantics ────────────────────────────────────────────────
 
 
@@ -171,3 +94,38 @@ def test_client_is_a_contextvar():
     from contextvars import ContextVar
 
     assert isinstance(_client, ContextVar)
+
+
+# ─── QueryBuilder resolves client at terminal time, not chain start ──────
+
+
+async def test_querybuilder_resolves_client_at_terminal_not_at_chain_start():
+    """Build a chain under client A, swap to client B before calling the
+    terminal — the request must hit B, not the captured A. Proves the
+    per-request RLS / use_client() story works even when chains span
+    context boundaries."""
+    from supabase_orm import SupabaseModel
+    from tests.conftest import FakeClient, FakeResponse
+
+    class Pet(SupabaseModel, table="pets_ctx"):
+        id: int
+        name: str
+
+    client_a = FakeClient()
+    client_b = FakeClient()
+    client_b.queue(FakeResponse(data=[{"id": 1, "name": "B-pet"}]))
+
+    set_client(client_a)  # type: ignore[arg-type]
+    try:
+        # Build chain under client A.
+        qb = Pet.query.eq("name", "x")
+        # Swap client mid-flight (the FastAPI middleware pattern).
+        async with use_client(client_b):  # type: ignore[arg-type]
+            rows = await qb.all()
+        # Request hit B (we queued B's response and got it back); A was
+        # never touched.
+        assert client_a.builders == []
+        assert len(client_b.builders) == 1
+        assert rows[0].name == "B-pet"
+    finally:
+        set_client(None)

@@ -316,3 +316,81 @@ async def test_refresh_replaces_state(fake_client):
     assert p.name == "Z"
     assert p.species == "dog"
     assert p.adopted is True
+
+
+# ─── Custom query_class hook ─────────────────────────────────────────────
+
+
+def test_default_query_class_is_querybuilder():
+    from supabase_orm import QueryBuilder
+
+    class M(SupabaseModel, table="qc_default"):
+        id: int
+
+    assert M.__query_class__ is QueryBuilder
+
+
+async def test_per_model_query_class_kwarg(fake_client):
+    from supabase_orm import QueryBuilder
+
+    from .conftest import FakeResponse
+
+    class PaginatedQB(QueryBuilder):
+        async def paginate(self, *, page: int, per_page: int):
+            return await self.range(page * per_page, (page + 1) * per_page - 1).all()
+
+    class M(SupabaseModel, table="qc_inline", query_class=PaginatedQB):
+        id: int
+
+    assert M.__query_class__ is PaginatedQB
+    assert isinstance(M.query, PaginatedQB)
+
+    fake_client.queue(FakeResponse(data=[{"id": 1}]))
+    rows = await M.query.eq("id", 1).paginate(page=0, per_page=10)
+    assert rows[0].id == 1
+
+
+def test_query_class_inherited_via_base_class():
+    """The MRO-inheritance pattern: define a base model with __query_class__
+    set, every subclass picks it up without specifying ``query_class=``."""
+    from supabase_orm import QueryBuilder
+
+    class _AppQB(QueryBuilder):
+        marker = "app-qb"
+
+    class _AppModel(SupabaseModel):
+        __query_class__ = _AppQB
+
+    class A(_AppModel, table="qc_inh_a"):
+        id: int
+
+    class B(_AppModel, table="qc_inh_b"):
+        id: int
+
+    assert A.__query_class__ is _AppQB
+    assert B.__query_class__ is _AppQB
+    assert isinstance(A.query, _AppQB)
+    assert A.query.marker == "app-qb"
+
+
+def test_per_model_kwarg_overrides_inherited():
+    """An inline ``query_class=`` on a child overrides the base's choice."""
+    from supabase_orm import QueryBuilder
+
+    class BaseQB(QueryBuilder):
+        marker = "base"
+
+    class OverrideQB(QueryBuilder):
+        marker = "override"
+
+    class _Base(SupabaseModel):
+        __query_class__ = BaseQB
+
+    class A(_Base, table="qc_ovr_a"):
+        id: int
+
+    class B(_Base, table="qc_ovr_b", query_class=OverrideQB):
+        id: int
+
+    assert A.__query_class__ is BaseQB
+    assert B.__query_class__ is OverrideQB

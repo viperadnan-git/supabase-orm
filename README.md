@@ -22,7 +22,7 @@
 
 - **PostgREST embeds, declared at the type level.** Mark a field as `Annotated[Owner, Relation(...)]` and the ORM builds the right `select=` string for you, including `!inner` / FK hints / per-relation filters.
 
-- **Per-request RLS via `ContextVar`.** Attach a JWT in a FastAPI middleware and Postgres row-level security sees the user. No client-per-request overhead, no leakage between concurrent requests.
+- **Per-request RLS via `ContextVar`.** Pair `use_client()` with a JWT-authenticated client in a FastAPI middleware — Postgres row-level security sees the user, with zero leakage between concurrent requests.
 
 - **Typed RPC helpers.** Call `setof` functions with row validation, get a single row, or coerce a scalar — all with one line.
 
@@ -399,19 +399,24 @@ app = FastAPI(lifespan=lifespan)
 
 ### Per-request RLS via JWT
 
-The client is stored in a `ContextVar`, so each FastAPI request runs in its own copied context — `set_auth()` mutations are isolated to that request, even under concurrent load.
+The client is stored in a `ContextVar`, so each FastAPI request runs in its own copied context. Pair `use_client()` with a per-request authenticated client to isolate the JWT — and therefore the RLS identity — to that request only:
 
 ```python
-from supabase_orm import set_auth
+from supabase import acreate_client
+from supabase_orm import use_client
 
 @app.middleware("http")
-async def attach_jwt(request, call_next):
-    if (auth := request.headers.get("authorization")):
-        set_auth(auth.removeprefix("Bearer "))
-    try:
+async def per_request_client(request, call_next):
+    auth = request.headers.get("authorization")
+    if not auth:
         return await call_next(request)
-    finally:
-        set_auth(None)   # back to the anon/service-role key from lifespan
+
+    jwt = auth.removeprefix("Bearer ")
+    client = await acreate_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    client.postgrest.auth(jwt)
+
+    async with use_client(client):
+        return await call_next(request)
 ```
 
 Inside a handler, just call the ORM as usual — Postgres RLS sees the user:
@@ -421,6 +426,9 @@ Inside a handler, just call the ORM as usual — Postgres RLS sees the user:
 async def my_pets():
     return await Pet.query.order_by("-created_at").all()
 ```
+
+> [!IMPORTANT]
+> Don't mutate the app-wide client's auth headers across requests (e.g. `get_client().postgrest.auth(jwt)` directly). The underlying postgrest sub-client is shared, so the mutation leaks across overlapping requests. `ContextVar` isolates *references*, not the objects they point at — `use_client()` with a per-request client is the only safe pattern.
 
 ### Per-request override with a dedicated client
 
@@ -492,7 +500,6 @@ from supabase_orm import (
 - Unfiltered bulk `delete()` / `update()` without `allow_unfiltered=True`.
 - `as_()` to a model on a different table.
 - `instance.update()` trying to change the primary key or a relation field.
-- `set_auth(None)` with no recorded default key.
 
 Map them to HTTP responses in one place:
 

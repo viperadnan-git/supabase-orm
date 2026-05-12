@@ -12,7 +12,29 @@ Don't reuse a builder after a terminal call; create a fresh one off ``Model.quer
 from __future__ import annotations
 
 from collections.abc import Sequence
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Callable, Generic, Self, TypeVar, cast, overload
+
+
+class _Op(StrEnum):
+    """Op-log discriminators. ``StrEnum`` so legacy string comparisons
+    (e.g. ``op[0] == "or"``) keep working — but new code should use the
+    enum members for autocomplete and to keep ``_replay`` /
+    ``_has_filter`` in sync if a new op kind is added."""
+
+    OP = "op"
+    OR = "or"
+    MATCH = "match"
+    ORDER = "order"
+    LIMIT = "limit"
+    OFFSET = "offset"
+    RANGE = "range"
+    FILTER = "filter"
+
+
+# Set of op kinds that count as a "narrowing" filter for the bulk
+# delete/update foot-gun guard.
+_FILTERING_OPS = frozenset({_Op.OP, _Op.OR, _Op.MATCH})
 
 from ._client import get_client
 from ._exceptions import (
@@ -21,7 +43,7 @@ from ._exceptions import (
     SupabaseORMUsageError,
 )
 from ._filters import apply_op, compile_predicate
-from ._predicates import Predicate
+from ._predicates import Column, Order, Predicate
 from ._serializers import serialize
 
 if TYPE_CHECKING:
@@ -200,6 +222,15 @@ def _compile_branches(
     return ",".join(parts)
 
 
+def _coerce_order(spec: "str | Column | Order") -> Order:
+    """Normalize an ``order_by`` arg to an :class:`Order` instance."""
+    if isinstance(spec, Order):
+        return spec
+    if isinstance(spec, Column):
+        return Order(spec._name, desc=False)
+    return Order.parse(spec)
+
+
 # ─── QueryBuilder ──────────────────────────────────────────────────────────
 
 
@@ -218,31 +249,23 @@ class QueryBuilder(_Filterable, Generic[T]):
     def __init__(self, model: type[T]) -> None:
         self._model = model
         self._select: str = model.__select__
-        self._client = get_client()
-        self._raw = self._client.table(model.__table__).select(self._select)
-        # Op log: every chain call records its tuple here so terminals like
-        # count() / delete() / update() can replay the same filters onto a
-        # fresh request without sharing state.
+        # Chain calls only append here. Terminals resolve ``get_client()``
+        # fresh and replay this log — so chains built before a
+        # ``use_client()`` block still see the current binding at execute time.
         self._ops: list[tuple] = []
 
     # ─── Filter mixin hooks ────────────────────────────────────────────────
 
     def _apply_op(self, name: str, column: str, value: Any) -> Self:
         self._model._validate_column(column)
-        self._ops.append(("op", name, column, value))
-        self._raw = apply_op(self._raw, name, column, value)
+        self._ops.append((_Op.OP, name, column, value))
         return self
 
     def _apply_predicate_group(self, group: str) -> Self:
         # postgrest-py's ``or_`` accepts the body of either an or-group or a
         # not.and-group; we build the wrapped string in ``_Filterable.or_/not_``.
-        if group.startswith("or("):
-            inner = group[3:-1]  # strip ``or(`` / ``)``
-            self._raw = self._raw.or_(inner)
-            self._ops.append(("or", inner))
-        else:  # ``not.and(...)``
-            self._raw = self._raw.or_(group)
-            self._ops.append(("or", group))
+        inner = group[3:-1] if group.startswith("or(") else group
+        self._ops.append((_Op.OR, inner))
         return self
 
     # ─── Selection & ordering ──────────────────────────────────────────────
@@ -261,32 +284,38 @@ class QueryBuilder(_Filterable, Generic[T]):
         for col in query:
             self._model._validate_column(col)
         serialized = {k: serialize(v) for k, v in query.items()}
-        self._raw = self._raw.match(serialized)
-        self._ops.append(("match", serialized))
+        self._ops.append((_Op.MATCH, serialized))
         return self
 
-    def order_by(self, *columns: str) -> Self:
-        """``"col"`` ascending, ``"-col"`` descending."""
+    def order_by(self, *columns: "str | Column | Order") -> Self:
+        """Order results by one or more columns.
+
+        Three accepted forms — mix freely::
+
+            Pet.query.order_by("-created_at", "name")           # string shorthand
+            Pet.query.order_by(Pet.f.created_at.desc())         # typed
+            Pet.query.order_by(Pet.f.last_login.desc(nulls="last"))
+
+        Strings use the Django ``"-col"`` prefix for descending. The typed
+        form unlocks ``nulls="first"`` / ``"last"`` ordering, which strings
+        don't expose.
+        """
         for c in columns:
-            desc = c.startswith("-")
-            col = c[1:] if desc else c
-            self._raw = self._raw.order(col, desc=desc)
-            self._ops.append(("order", col, desc))
+            order = _coerce_order(c)
+            self._model._validate_column(order.column)
+            self._ops.append((_Op.ORDER, order))
         return self
 
     def limit(self, n: int) -> Self:
-        self._raw = self._raw.limit(n)
-        self._ops.append(("limit", n))
+        self._ops.append((_Op.LIMIT, n))
         return self
 
     def offset(self, n: int) -> Self:
-        self._raw = self._raw.offset(n)
-        self._ops.append(("offset", n))
+        self._ops.append((_Op.OFFSET, n))
         return self
 
     def range(self, start: int, end: int) -> Self:
-        self._raw = self._raw.range(start, end)
-        self._ops.append(("range", start, end))
+        self._ops.append((_Op.RANGE, start, end))
         return self
 
     # ─── Projection / rebind ───────────────────────────────────────────────
@@ -318,10 +347,6 @@ class QueryBuilder(_Filterable, Generic[T]):
             )
         self._model = cast("type[T]", model)
         self._select = model.__select__
-        # Postgrest doesn't allow chaining a second .select(), so rebuild from
-        # scratch and replay the recorded ops onto the fresh builder.
-        self._raw = self._client.table(model.__table__).select(self._select)
-        self._raw = self._replay(self._raw)
         return cast("QueryBuilder[U]", self)
 
     async def values(self, *columns: str) -> list[dict[str, Any]]:
@@ -336,10 +361,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         """
         if not columns:
             raise SupabaseORMUsageError(".values() requires at least one column.")
-        select_str = ",".join(columns)
-        b = self._client.table(self._model.__table__).select(select_str)
-        b = self._replay(b)
-        b = self._apply_relation_filters_on(b)
+        b = self._make_select(select=",".join(columns))
         resp = await b.execute()
         return resp.data or []
 
@@ -348,10 +370,26 @@ class QueryBuilder(_Filterable, Generic[T]):
     def raw(self) -> Any:
         """Return the underlying postgrest async builder for ops we don't model.
 
-        Pair with :func:`supabase_orm.serialize` if you need wire-value
-        coercion for non-JSON-native python types.
+        Resolves the client at call time, so the builder is bound to the
+        current ContextVar — pair with ``use_client()`` in a request
+        scope and the escape hatch sees the same client as the rest of
+        your handler. Pair with :func:`supabase_orm.serialize` if you
+        need wire-value coercion for non-JSON-native python types.
         """
-        return self._apply_relation_filters_on(self._raw)
+        return self._make_select()
+
+    # ─── Build helpers ─────────────────────────────────────────────────────
+
+    def _make_select(self, *, select: str | None = None, **select_kw: Any) -> Any:
+        """Build a fresh select-style postgrest builder bound to the current
+        client, replay the op log, and apply relation filters."""
+        b = (
+            get_client()
+            .table(self._model.__table__)
+            .select(select if select is not None else self._select, **select_kw)
+        )
+        b = self._replay(b)
+        return self._apply_relation_filters_on(b)
 
     # ─── Internal replay ───────────────────────────────────────────────────
 
@@ -359,38 +397,36 @@ class QueryBuilder(_Filterable, Generic[T]):
         """Replay the recorded op log onto ``target`` (a postgrest builder)."""
         for op in self._ops:
             kind = op[0]
-            if kind == "op":
+            if kind is _Op.OP:
                 _, name, col, val = op
                 target = apply_op(target, name, col, val)
-            elif kind == "or":
+            elif kind is _Op.OR:
                 target = target.or_(op[1])
-            elif kind == "order":
-                target = target.order(op[1], desc=op[2])
-            elif kind == "limit":
+            elif kind is _Op.ORDER:
+                order: Order = op[1]
+                kw: dict[str, Any] = {"desc": order.desc}
+                if order.nulls is not None:
+                    # postgrest-py expects ``nullsfirst: bool`` — translate.
+                    kw["nullsfirst"] = order.nulls == "first"
+                target = target.order(order.column, **kw)
+            elif kind is _Op.LIMIT:
                 target = target.limit(op[1])
-            elif kind == "offset":
+            elif kind is _Op.OFFSET:
                 target = target.offset(op[1])
-            elif kind == "range":
+            elif kind is _Op.RANGE:
                 target = target.range(op[1], op[2])
-            elif kind == "match":
+            elif kind is _Op.MATCH:
                 target = target.match(op[1])
-            elif kind == "filter":
+            elif kind is _Op.FILTER:
                 _, col, operator, value = op
                 target = target.filter(col, operator, value)
         return target
 
     def _apply_relation_filters_on(self, target: Any) -> Any:
-        """Apply ``Relation(filter=...)`` clauses without recording into ops."""
-        for fname, (_cls, _is_list, relation) in self._model.__relations__.items():
-            if not relation.filter:
-                continue
-            for key, val in relation.filter.items():
-                col, _, op = key.partition("__")
-                op = op or "eq"
-                pred = compile_predicate(op, col, val)
-                _, _, rest = pred.partition(".")
-                operator, _, value = rest.partition(".")
-                target = target.filter(f"{fname}.{col}", operator, value)
+        """Apply ``Relation(filter=...)`` clauses from the pre-baked spec
+        tuple. No-op when the model has no filtered relations."""
+        for col, op, value in self._model.__relation_filter_specs__:
+            target = target.filter(col, op, value)
         return target
 
     def _has_filter(self) -> bool:
@@ -399,13 +435,12 @@ class QueryBuilder(_Filterable, Generic[T]):
         Used by ``delete()``/``update()`` as a foot-gun guard so an
         unfiltered ``.query.delete()`` raises rather than wiping the table.
         """
-        return any(op[0] in ("op", "or", "match") for op in self._ops)
+        return any(op[0] in _FILTERING_OPS for op in self._ops)
 
     # ─── Read terminals ────────────────────────────────────────────────────
 
     async def all(self) -> list[T]:
-        self._raw = self._apply_relation_filters_on(self._raw)
-        resp = await self._raw.execute()
+        resp = await self._make_select().execute()
         return self._validate_rows(resp.data or [])
 
     async def all_with_count(self) -> tuple[list[T], int]:
@@ -415,24 +450,23 @@ class QueryBuilder(_Filterable, Generic[T]):
         ``count="exact"`` is computed on the FILTERED row set, ignoring
         ``limit``/``offset``, which is the standard pagination semantics.
         """
-        # ``count="exact"`` must be passed on the initial select; rebuild
-        # from the op log instead of mutating ``self._raw``.
-        b = self._client.table(self._model.__table__).select(
-            self._select, count="exact"
-        )
-        b = self._replay(b)
-        b = self._apply_relation_filters_on(b)
-        resp = await b.execute()
+        resp = await self._make_select(count="exact").execute()
         rows = self._validate_rows(resp.data or [])
         return rows, getattr(resp, "count", None) or 0
 
+    async def _take(self, n: int) -> list[T]:
+        """Run the query with an ad-hoc ``.limit(n)`` without polluting
+        the op log — so ``first()``/``one()``/``maybe_one()`` are
+        idempotent on repeat calls."""
+        resp = await self._make_select().limit(n).execute()
+        return self._validate_rows(resp.data or [])
+
     async def first(self) -> T | None:
-        self.limit(1)
-        rows = await self.all()
+        rows = await self._take(1)
         return rows[0] if rows else None
 
     async def one(self) -> T:
-        rows = await self.limit(2).all()
+        rows = await self._take(2)
         if not rows:
             raise SupabaseORMDoesNotExist(f"No {self._model.__name__} matched query")
         if len(rows) > 1:
@@ -442,7 +476,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         return rows[0]
 
     async def maybe_one(self) -> T | None:
-        rows = await self.limit(2).all()
+        rows = await self._take(2)
         if not rows:
             return None
         if len(rows) > 1:
@@ -455,11 +489,7 @@ class QueryBuilder(_Filterable, Generic[T]):
     async def count(self) -> int:
         """Count matching rows on a fresh head-only request, replaying the
         recorded op log so filters (including relation filters) are honored."""
-        b = self._client.table(self._model.__table__).select(
-            "*", count="exact", head=True
-        )
-        b = self._replay(b)
-        b = self._apply_relation_filters_on(b)
+        b = self._make_select(select="*", count="exact", head=True)
         resp = await b.execute()
         return getattr(resp, "count", None) or 0
 
@@ -477,7 +507,7 @@ class QueryBuilder(_Filterable, Generic[T]):
                 "Refusing unfiltered .delete() — chain at least one filter or "
                 "pass allow_unfiltered=True to wipe the table."
             )
-        b = self._client.table(self._model.__table__).delete()
+        b = get_client().table(self._model.__table__).delete()
         b = self._replay(b)
         b = self._apply_relation_filters_on(b)
         resp = await b.execute()
@@ -499,7 +529,7 @@ class QueryBuilder(_Filterable, Generic[T]):
                 "update() requires at least one key=value to set."
             )
         payload = {k: serialize(v) for k, v in values.items()}
-        b = self._client.table(self._model.__table__).update(payload)
+        b = get_client().table(self._model.__table__).update(payload)
         b = self._replay(b)
         b = self._apply_relation_filters_on(b)
         resp = await b.execute()

@@ -30,9 +30,12 @@ to the compile pipeline — callers should only ever see :class:`Predicate`.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from ._filters import compile_predicate
+
+NullsPosition = Literal["first", "last"]
 
 if TYPE_CHECKING:
     from ._base import SupabaseModel
@@ -233,6 +236,38 @@ class Column(Generic[T]):
 
     def wfts(self, query: str) -> Predicate:
         return self._atom("wfts", query)
+
+    # ─── Ordering ──────────────────────────────────────────────────────────
+
+    def asc(self, *, nulls: NullsPosition | None = None) -> "Order":
+        """Order by this column ascending. ``nulls=`` controls null position."""
+        return Order(self._name, desc=False, nulls=nulls)
+
+    def desc(self, *, nulls: NullsPosition | None = None) -> "Order":
+        """Order by this column descending. ``nulls=`` controls null position."""
+        return Order(self._name, desc=True, nulls=nulls)
+
+
+# ─── Order ────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class Order:
+    """A single ``ORDER BY`` clause. Build via ``Pet.f.<col>.asc()`` /
+    ``.desc()`` or pass strings to :meth:`QueryBuilder.order_by`."""
+
+    column: str
+    desc: bool = False
+    nulls: NullsPosition | None = None
+
+    @classmethod
+    def parse(cls, spec: str) -> "Order":
+        """Parse the Django-style ``"-col"`` shorthand into an :class:`Order`.
+        Bare ``"col"`` defaults to ascending."""
+        spec = spec.strip()
+        if spec.startswith("-"):
+            return cls(spec[1:], desc=True)
+        return cls(spec, desc=False)
 
 
 # ─── f namespace ──────────────────────────────────────────────────────────

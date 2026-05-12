@@ -23,11 +23,15 @@ from ._serializers import serialize
 BuilderCall = Callable[[Any, str, Any], Any]
 """(postgrest_builder, column, value) → builder."""
 
-PredicateCompiler = Callable[[str, Any], str]
-"""(column, value) → 'col.op.value' string for or_/not_ groups."""
+ValueFormatter = Callable[[Any], str]
+"""value → wire-formatted value string. Op-specific quoting / shape."""
 
 OPERATORS: dict[str, BuilderCall] = {}
-PREDICATES: dict[str, PredicateCompiler] = {}
+WIRE_NAMES: dict[str, str] = {}
+VALUE_FORMATTERS: dict[str, ValueFormatter] = {}
+
+# Back-compat alias — older external code may import ``PREDICATES``.
+PREDICATES = VALUE_FORMATTERS
 
 
 def register_op(
@@ -35,7 +39,7 @@ def register_op(
     *,
     wire: str | None = None,
     builder: BuilderCall | None = None,
-    predicate: PredicateCompiler | None = None,
+    predicate: ValueFormatter | None = None,
 ) -> Callable[[BuilderCall], BuilderCall] | BuilderCall:
     """Register an operator.
 
@@ -43,15 +47,17 @@ def register_op(
     ``wire`` is the PostgREST operator string used in ``or=(col.OP.val)``
     predicate groups. Defaults to ``name``. Override when ``name`` collides
     with a Python keyword — e.g. ``register_op("in_", wire="in")``.
+
+    ``predicate`` is a value-only formatter ``(val) -> str``. Defaults to
+    :func:`_pred_value` (handles scalars, sequences, comma-quoting). Override
+    for ops that need a different value shape — e.g. arrays use ``{a,b,c}``.
     """
     wire_name = wire or name
 
-    def _default_pred(col: str, val: Any) -> str:
-        return f"{col}.{wire_name}.{_pred_value(val)}"
-
     def _do(fn: BuilderCall) -> BuilderCall:
         OPERATORS[name] = fn
-        PREDICATES[name] = predicate or _default_pred
+        WIRE_NAMES[name] = wire_name
+        VALUE_FORMATTERS[name] = predicate or _pred_value
         return fn
 
     if builder is not None:
@@ -84,11 +90,20 @@ def apply_op(builder: Any, op: str, col: str, val: Any) -> Any:
     return fn(builder, col, val)
 
 
-def compile_predicate(op: str, col: str, val: Any) -> str:
-    fn = PREDICATES.get(op)
-    if fn is None:
+def compile_value(op: str, val: Any) -> str:
+    """Wire-format the value side of a predicate (no column, no operator)."""
+    fmt = VALUE_FORMATTERS.get(op)
+    if fmt is None:
         raise KeyError(f"Unknown operator: {op!r}")
-    return fn(col, val)
+    return fmt(val)
+
+
+def compile_predicate(op: str, col: str, val: Any) -> str:
+    """Build a full ``col.op.value`` predicate string."""
+    wire = WIRE_NAMES.get(op)
+    if wire is None:
+        raise KeyError(f"Unknown operator: {op!r}")
+    return f"{col}.{wire}.{VALUE_FORMATTERS[op](val)}"
 
 
 # ─── Builtin operators ─────────────────────────────────────────────────────
@@ -134,13 +149,11 @@ def _ilike(b, c, v):
     return b.ilike(c, v)
 
 
-@register_op(
-    "in_",
-    wire="in",
-    predicate=lambda c, v: (
-        f"{c}.in.({','.join(_pred_value(x).strip('()') for x in v)})"
-    ),
-)
+def _in_value(v: Any) -> str:
+    return "(" + ",".join(_pred_value(x).strip("()") for x in v) + ")"
+
+
+@register_op("in_", wire="in", predicate=_in_value)
 def _in(b, c, v):
     return b.in_(c, [serialize(x) for x in v])
 
@@ -150,36 +163,27 @@ def _is(b, c, v):
     return b.is_(c, v)
 
 
-# PostgREST array/range ops have two quirks vs. simple operators:
-#  * URL-tree wire names are short (``cs`` / ``cd`` / ``ov``); the long
-#    Python names map to supabase-py builder methods only.
-#  * Array literals use Postgres ``{a,b}`` braces inside predicate strings
-#    (``in`` uses ``(a,b)`` parens — different shape, same idea).
-# Builder-side serialization is handled by supabase-py; we only need the
-# predicate-string form here.
-def _array_pred_value(val: Any) -> str:
+# Array/range ops use Postgres ``{a,b}`` braces (``in`` uses ``(a,b)`` parens).
+# Wire names are short (``cs`` / ``cd`` / ``ov``); the long Python names map
+# to supabase-py builder methods only.
+def _array_value(val: Any) -> str:
     val = serialize(val)
     if isinstance(val, (list, tuple, set)):
         return "{" + ",".join(_pred_value(v).strip('"') for v in val) + "}"
     return _pred_value(val)
 
 
-def _array_pred(wire: str) -> PredicateCompiler:
-    """Factory for the three array/range ops — same shape, different wire."""
-    return lambda c, v: f"{c}.{wire}.{_array_pred_value(v)}"
-
-
-@register_op("contains", wire="cs", predicate=_array_pred("cs"))
+@register_op("contains", wire="cs", predicate=_array_value)
 def _contains(b, c, v):
     return b.contains(c, serialize(v))
 
 
-@register_op("contained_by", wire="cd", predicate=_array_pred("cd"))
+@register_op("contained_by", wire="cd", predicate=_array_value)
 def _contained_by(b, c, v):
     return b.contained_by(c, serialize(v))
 
 
-@register_op("overlaps", wire="ov", predicate=_array_pred("ov"))
+@register_op("overlaps", wire="ov", predicate=_array_value)
 def _overlaps(b, c, v):
     return b.overlaps(c, serialize(v))
 

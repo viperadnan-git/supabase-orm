@@ -28,13 +28,28 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from ._client import get_client
 from ._embed import Relation, build_select, collect_relations
 from ._exceptions import SupabaseORMDoesNotExist, SupabaseORMUsageError
+from ._filters import compile_value
 from ._predicates import _FieldsAccess
 from ._query import QueryBuilder
 from ._serializers import serialize
 
-_TABLE_REGISTRY: dict[str, list[type["SupabaseModel"]]] = {}
-
 _T = TypeVar("_T", bound="SupabaseModel")
+
+
+def _compile_relation_filter_specs(
+    relations: dict[str, tuple[type, bool, Relation]],
+) -> tuple[tuple[str, str, str], ...]:
+    """Pre-bake ``Relation(filter=...)`` specs into ``(col, op, wire)`` triples
+    ready to feed into postgrest's ``.filter(col, op, value)``."""
+    specs: list[tuple[str, str, str]] = []
+    for fname, (_cls, _is_list, relation) in relations.items():
+        if not relation.filter:
+            continue
+        for key, val in relation.filter.items():
+            col, _, op = key.partition("__")
+            op = op or "eq"
+            specs.append((f"{fname}.{col}", op, compile_value(op, val)))
+    return tuple(specs)
 
 
 class _QueryDescriptor:
@@ -51,16 +66,25 @@ class _QueryDescriptor:
                 f"{owner.__name__} has no __table__. Declare with "
                 f'`class {owner.__name__}(SupabaseModel, table="..."):`'
             )
-        return QueryBuilder(owner)
+        return owner.__query_class__(owner)
 
 
 class SupabaseModel(BaseModel):
     """Base class for tables. Configure per-subclass via class kwargs.
 
     Class kwargs:
-        table:  PostgREST table / view name. Required on concrete subclasses.
-        pk:     Primary key field name. Default ``"id"``.
-        select: Override the auto-derived select string (escape hatch).
+        table:        PostgREST table / view name. Required on concrete subclasses.
+        pk:           Primary key field name. Default ``"id"``.
+        select:       Override the auto-derived select string (escape hatch).
+        query_class:  Use a custom :class:`QueryBuilder` subclass for ``.query``.
+                      Inherited via MRO, so a project-wide base model can set it
+                      once and every subclass picks it up::
+
+                          class _AppModel(SupabaseModel):
+                              __query_class__ = MyQueryBuilder
+
+                          class User(_AppModel, table="users"):
+                              ...
     """
 
     model_config = ConfigDict(
@@ -75,7 +99,13 @@ class SupabaseModel(BaseModel):
     # Populated by ``__pydantic_init_subclass__`` so hot paths don't reflect
     # over ``model_fields`` on every query.
     __relations__: ClassVar[dict[str, tuple[type, bool, Relation]]] = {}
+    # Pre-compiled ``(col, op, wire)`` triples ready to feed straight into
+    # postgrest's ``.filter(...)``. Built once per subclass.
+    __relation_filter_specs__: ClassVar[tuple[tuple[str, str, str], ...]] = ()
     __list_adapter__: ClassVar[TypeAdapter | None] = None
+    # Custom QueryBuilder subclass (MRO-inherited). Override per-project
+    # via a base class or per-model via ``query_class=`` kwarg.
+    __query_class__: ClassVar[type["QueryBuilder"]] = QueryBuilder
 
     query: ClassVar[_QueryDescriptor] = _QueryDescriptor()
     # Typed predicate namespace — ``Pet.f.age >= 5`` returns a Predicate.
@@ -89,12 +119,15 @@ class SupabaseModel(BaseModel):
         table: str | None = None,
         pk: str = "id",
         select: str | None = None,
+        query_class: type["QueryBuilder"] | None = None,
         **kw: Any,
     ) -> None:
         # Pydantic populates model_fields AFTER this hook runs, so we just
         # capture the table-level kwargs here. ``__pydantic_init_subclass__``
         # below builds the cached metadata once fields are available.
         super().__init_subclass__(**kw)
+        if query_class is not None:
+            cls.__query_class__ = query_class
         if table is None:
             return
         cls.__table__ = table
@@ -111,9 +144,11 @@ class SupabaseModel(BaseModel):
             else build_select(cls)
         )
         cls.__relations__ = collect_relations(cls)
+        cls.__relation_filter_specs__ = _compile_relation_filter_specs(
+            cls.__relations__
+        )
         cls.__list_adapter__ = TypeAdapter(list[cls])
         cls.f = _FieldsAccess(cls)
-        _TABLE_REGISTRY.setdefault(cls.__table__, []).append(cls)
 
     # ─── Builder entry point ───────────────────────────────────────────────
 

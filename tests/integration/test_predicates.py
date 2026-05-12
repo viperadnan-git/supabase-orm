@@ -161,3 +161,45 @@ async def test_legacy_lambda_or_still_works(clean):
         lambda q: q.eq("name", pets[2].name),
     ).all()
     assert {p.id for p in rows} == {pets[0].id, pets[2].id}
+
+
+# ─── Order / .asc() / .desc() ────────────────────────────────────────────
+
+
+async def test_typed_order_desc_real_round_trip(clean):
+    pets = await _seed_pets()
+    rows = await Pet.query.order_by(Pet.f.amount.desc()).all()
+    assert [r.amount for r in rows] == sorted([p.amount for p in pets], reverse=True)
+
+
+async def test_typed_order_asc_default(clean):
+    pets = await _seed_pets()
+    rows = await Pet.query.order_by(Pet.f.amount).all()
+    assert [r.amount for r in rows] == sorted(p.amount for p in pets)
+
+
+async def test_order_by_with_nulls_last(clean):
+    """``nulls="last"`` puts NULLs after the values regardless of ASC/DESC."""
+    pets = await _seed_pets()
+    # Null out one pet's owner_id; sort by owner_id with nulls last.
+    await pets[0].update(owner_id=None)
+    rows = await Pet.query.order_by(Pet.f.owner_id.asc(nulls="last")).all()
+    # The orphaned pet must appear at the end.
+    assert rows[-1].id == pets[0].id
+
+
+async def test_order_by_string_and_typed_compose(clean):
+    """Strings and Order objects mix freely in one call."""
+    await _seed_pets()
+    rows = await Pet.query.order_by("species", Pet.f.amount.desc()).all()
+    # First sort key: species asc; ties broken by amount desc.
+    species_groups: list[list[float]] = []
+    last_species = None
+    for r in rows:
+        if r.species != last_species:
+            species_groups.append([])
+            last_species = r.species
+        species_groups[-1].append(r.amount)
+    # Each species group must be amount-descending internally.
+    for group in species_groups:
+        assert group == sorted(group, reverse=True)
