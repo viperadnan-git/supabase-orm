@@ -397,3 +397,207 @@ def test_per_model_kwarg_overrides_inherited():
 
     assert A.__query_class__ is BaseQB
     assert B.__query_class__ is OverrideQB
+
+
+# ─── upsert / bulk_upsert ─────────────────────────────────────────────────
+
+
+def test_upsert_flat_uses_upsert_response_directly(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[
+                {"id": str(pid), "name": "Whiskers", "species": "cat", "adopted": True}
+            ]
+        )
+    )
+    p = Pet.upsert(
+        id=pid,
+        name="Whiskers",
+        species="cat",
+        adopted=True,
+        on_conflict="id",
+    )
+    assert isinstance(p, Pet) and p.adopted is True
+
+    builder = fake_client.builders[0]
+    upsert_call = next(c for c in builder.calls if c[0] == "upsert")
+    payload, kwargs = upsert_call[1][0], upsert_call[2]
+    assert payload["id"] == str(pid)
+    assert kwargs["on_conflict"] == "id"
+    assert kwargs["ignore_duplicates"] is False
+
+
+def test_upsert_ignore_duplicates_passes_through(fake_client):
+    fake_client.queue(
+        FakeResponse(
+            data=[{"id": str(uuid4()), "name": "a", "species": "cat", "adopted": False}]
+        )
+    )
+    Pet.upsert(name="a", species="cat", adopted=False, ignore_duplicates=True)
+    builder = fake_client.builders[0]
+    upsert_call = next(c for c in builder.calls if c[0] == "upsert")
+    assert upsert_call[2]["ignore_duplicates"] is True
+
+
+def test_upsert_returns_no_rows_raises(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    with pytest.raises(ValueError, match="returned no rows"):
+        Pet.upsert(name="x", species="cat", adopted=False)
+
+
+def test_bulk_upsert_validates_each_row(fake_client):
+    rows = [
+        {"id": str(uuid4()), "name": "A", "species": "cat", "adopted": False},
+        {"id": str(uuid4()), "name": "B", "species": "dog", "adopted": True},
+    ]
+    fake_client.queue(FakeResponse(data=rows))
+    out = Pet.bulk_upsert(
+        [
+            {
+                "id": UUID(r["id"]),
+                "name": r["name"],
+                "species": r["species"],
+                "adopted": r["adopted"],
+            }
+            for r in rows
+        ],
+        on_conflict="id",
+    )
+    assert [p.name for p in out] == ["A", "B"]
+
+
+def test_bulk_upsert_empty_list_no_call(fake_client):
+    assert Pet.bulk_upsert([]) == []
+    assert fake_client.builders == []
+
+
+# ─── get_or_create / update_or_create ─────────────────────────────────────
+
+
+def test_get_or_create_returns_existing_when_found(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[
+                {"id": str(pid), "name": "Whiskers", "species": "cat", "adopted": False}
+            ]
+        )
+    )
+    p, created = Pet.get_or_create(species="cat", defaults={"name": "X"})
+    assert created is False and p.name == "Whiskers"
+    # Only one round-trip — the lookup.
+    assert len(fake_client.builders) == 1
+    assert any(c[0] == "select" for c in fake_client.builders[0].calls)
+
+
+def test_get_or_create_creates_when_missing(fake_client):
+    pid = uuid4()
+    # 1st: lookup returns empty. 2nd: insert returns the new row.
+    fake_client.queue(
+        FakeResponse(data=[]),
+        FakeResponse(
+            data=[
+                {"id": str(pid), "name": "Whiskers", "species": "cat", "adopted": False}
+            ]
+        ),
+    )
+    p, created = Pet.get_or_create(
+        species="cat",
+        defaults={"id": pid, "name": "Whiskers", "adopted": False},
+    )
+    assert created is True and p.id == pid
+    # Two round-trips — lookup + insert.
+    assert len(fake_client.builders) == 2
+    insert_call = next(c for c in fake_client.builders[1].calls if c[0] == "insert")
+    payload = insert_call[1][0]
+    assert payload["species"] == "cat" and payload["name"] == "Whiskers"
+
+
+def test_update_or_create_updates_when_found(fake_client):
+    pid = uuid4()
+    # 1st: lookup. 2nd: UPDATE round-trip from instance.update().
+    fake_client.queue(
+        FakeResponse(
+            data=[
+                {"id": str(pid), "name": "Whiskers", "species": "cat", "adopted": False}
+            ]
+        ),
+        FakeResponse(
+            data=[{"id": str(pid), "name": "Mr.W", "species": "cat", "adopted": True}]
+        ),
+    )
+    p, created = Pet.update_or_create(
+        species="cat",
+        defaults={"name": "Mr.W", "adopted": True},
+    )
+    assert created is False and p.name == "Mr.W" and p.adopted is True
+
+
+def test_update_or_create_creates_when_missing(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(data=[]),
+        FakeResponse(
+            data=[
+                {"id": str(pid), "name": "Whiskers", "species": "cat", "adopted": False}
+            ]
+        ),
+    )
+    p, created = Pet.update_or_create(
+        species="cat",
+        defaults={"id": pid, "name": "Whiskers", "adopted": False},
+    )
+    assert created is True and p.id == pid
+
+
+def test_upsert_accepts_typed_column(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[{"id": str(pid), "name": "x", "species": "cat", "adopted": False}]
+        )
+    )
+    Pet.upsert(id=pid, name="x", species="cat", adopted=False, on_conflict=Pet.f.id)
+    upsert_call = next(c for c in fake_client.builders[0].calls if c[0] == "upsert")
+    assert upsert_call[2]["on_conflict"] == "id"
+
+
+def test_upsert_accepts_list_of_columns_for_composite(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[{"id": str(pid), "name": "x", "species": "cat", "adopted": False}]
+        )
+    )
+    Pet.upsert(
+        id=pid,
+        name="x",
+        species="cat",
+        adopted=False,
+        on_conflict=[Pet.f.name, Pet.f.species],
+    )
+    upsert_call = next(c for c in fake_client.builders[0].calls if c[0] == "upsert")
+    assert upsert_call[2]["on_conflict"] == "name,species"
+
+
+def test_upsert_typo_in_column_raises_at_call_site():
+    """Pet.f.<typo> raises before any wire call — the type-safety win."""
+    with pytest.raises(AttributeError, match="no column 'speceis'"):
+        _ = Pet.f.speceis  # noqa: F841
+
+
+def test_bulk_upsert_accepts_column_list_for_composite(fake_client):
+    fake_client.queue(
+        FakeResponse(
+            data=[
+                {"id": str(uuid4()), "name": "A", "species": "cat", "adopted": False},
+            ]
+        )
+    )
+    Pet.bulk_upsert(
+        [{"name": "A", "species": "cat", "adopted": False}],
+        on_conflict=[Pet.f.name, Pet.f.species],
+    )
+    upsert_call = next(c for c in fake_client.builders[0].calls if c[0] == "upsert")
+    assert upsert_call[2]["on_conflict"] == "name,species"

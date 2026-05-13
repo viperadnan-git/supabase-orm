@@ -28,12 +28,21 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from .._embed import Relation, build_select, collect_relations
 from .._exceptions import SupabaseORMDoesNotExist, SupabaseORMUsageError
 from .._filters import compile_value
-from .._predicates import _FieldsAccess
+from .._predicates import Column, _FieldsAccess
 from .._serializers import serialize
 from ._client import get_client
 from ._query import QueryBuilder
 
 _T = TypeVar("_T", bound="SupabaseModel")
+
+
+def _coerce_on_conflict(spec: "str | Column | list[str | Column] | None") -> str | None:
+    """Normalize ``on_conflict`` to PostgREST's comma-separated column form."""
+    if spec is None or isinstance(spec, str):
+        return spec
+    if isinstance(spec, Column):
+        return spec._name
+    return ",".join(c._name if isinstance(c, Column) else c for c in spec)
 
 
 def _compile_relation_filter_specs(
@@ -224,6 +233,110 @@ class SupabaseModel(BaseModel):
             if adapter
             else [cls.model_validate(r) for r in data]
         )
+
+    @classmethod
+    async def upsert(
+        cls,
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = None,
+        ignore_duplicates: bool = False,
+        **values: Any,
+    ) -> Self:
+        """Insert or update on conflict. Returns the resulting row.
+
+        ``on_conflict``: unique-constraint column(s) used to detect duplicates.
+        Accepts a typed ``Column`` (e.g. ``Pet.f.email``), a list of columns
+        for composite uniques (``[Pet.f.email, Pet.f.tenant_id]``), or a
+        string for arbitrary constraints. ``None`` (default) lets PostgREST
+        fall back to the table's primary key.
+
+        ``ignore_duplicates=True``: keep the existing row unchanged on conflict
+        (PostgREST does NOT return its data in that case, so this raises if no
+        new row was inserted — call :meth:`find` after if you need the row).
+        """
+        payload = {k: serialize(v) for k, v in values.items()}
+        kw: dict[str, Any] = {"ignore_duplicates": ignore_duplicates}
+        normalized = _coerce_on_conflict(on_conflict)
+        if normalized is not None:
+            kw["on_conflict"] = normalized
+        resp = await get_client().table(cls.__table__).upsert(payload, **kw).execute()
+        if not resp.data:
+            raise ValueError(f"{cls.__name__}.upsert returned no rows")
+        if cls.__relations__:
+            return await cls.get(resp.data[0][cls.__pk__])
+        return cls.model_validate(resp.data[0])
+
+    @classmethod
+    async def bulk_upsert(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = None,
+        ignore_duplicates: bool = False,
+    ) -> list[Self]:
+        """Bulk-upsert. ``on_conflict`` / ``ignore_duplicates`` as in :meth:`upsert`."""
+        if not rows:
+            return []
+        payload = [{k: serialize(v) for k, v in r.items()} for r in rows]
+        kw: dict[str, Any] = {"ignore_duplicates": ignore_duplicates}
+        normalized = _coerce_on_conflict(on_conflict)
+        if normalized is not None:
+            kw["on_conflict"] = normalized
+        resp = await get_client().table(cls.__table__).upsert(payload, **kw).execute()
+        data = resp.data or []
+        if not data:
+            return []
+        if cls.__relations__:
+            ids = [r[cls.__pk__] for r in data]
+            return await cls.query.in_(cls.__pk__, ids).all()
+        adapter = cls.__list_adapter__
+        return (
+            adapter.validate_python(data)
+            if adapter
+            else [cls.model_validate(r) for r in data]
+        )
+
+    @classmethod
+    async def get_or_create(
+        cls,
+        *,
+        defaults: dict[str, Any] | None = None,
+        **lookup: Any,
+    ) -> tuple[Self, bool]:
+        """Fetch the row matching ``lookup``, or create it.
+
+        Returns ``(obj, created)``. Two round-trips; not race-safe — between
+        the lookup and the insert another writer can land a matching row.
+        For atomic semantics, prefer :meth:`upsert` with a unique constraint.
+        """
+        q = cls.query
+        for col, val in lookup.items():
+            q = q.eq(col, val)
+        existing = await q.maybe_one()
+        if existing is not None:
+            return existing, False
+        return await cls.create(**{**lookup, **(defaults or {})}), True
+
+    @classmethod
+    async def update_or_create(
+        cls,
+        *,
+        defaults: dict[str, Any] | None = None,
+        **lookup: Any,
+    ) -> tuple[Self, bool]:
+        """Update the row matching ``lookup`` (with ``defaults``), or create.
+
+        Returns ``(obj, created)``. Same race caveats as :meth:`get_or_create`.
+        """
+        q = cls.query
+        for col, val in lookup.items():
+            q = q.eq(col, val)
+        existing = await q.maybe_one()
+        if existing is not None:
+            if defaults:
+                await existing.update(**defaults)
+            return existing, False
+        return await cls.create(**{**lookup, **(defaults or {})}), True
 
     async def update(self, **values: Any) -> Self:
         """Assign the given fields and persist in one call.

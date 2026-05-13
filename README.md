@@ -420,6 +420,26 @@ await p.update(name="Mr. Whiskers", adopted=True)
 await Pet.query.eq("adopted", False).update(adopted=True)
 ```
 
+### Upsert
+
+Atomic insert-or-update via PostgREST's native upsert. `on_conflict` accepts a typed `Pet.f.<col>`, a list (composite uniques), or a raw string; defaults to the table's PK.
+
+```python
+await Pet.upsert(id=pid, name="Whiskers", species="cat", adopted=True)
+await Pet.upsert(name="Whiskers", species="cat", on_conflict=Pet.f.name)
+await Pet.upsert(..., on_conflict=[Pet.f.name, Pet.f.species])     # composite
+await Pet.bulk_upsert([{...}, {...}], on_conflict="name,species")  # bulk
+```
+
+### Get-or-create / update-or-create
+
+Django-style convenience: kwargs are the lookup, `defaults` are extra fields applied only on the create branch. Returns `(obj, created)`. Two round-trips and **not race-safe** — for atomic semantics, use `upsert()` with a unique constraint.
+
+```python
+pet, created = await Pet.get_or_create(species="cat", defaults={"name": "Whiskers"})
+pet, created = await Pet.update_or_create(species="cat", defaults={"adopted": True})
+```
+
 ### Delete
 
 ```python
