@@ -299,7 +299,7 @@ async def test_delete_runs_eq_pk(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     await p.delete()
     calls = fake_client.builders[0].calls
-    assert ("delete", (), {}) in calls
+    assert ("delete", (), {"returning": "minimal"}) in calls
     eq_call = next(c for c in calls if c[0] == "eq")
     assert eq_call[1] == ("id", str(pid))
 
@@ -441,6 +441,28 @@ async def test_upsert_returns_no_rows_raises(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     with pytest.raises(ValueError, match="returned no rows"):
         await Pet.upsert(name="x", species="cat", adopted=False)
+
+
+async def test_upsert_ignore_duplicates_no_data_returns_none(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    result = await Pet.upsert(
+        name="x", species="cat", adopted=False, ignore_duplicates=True
+    )
+    assert result is None
+
+
+async def test_upsert_ignore_duplicates_with_data_returns_row(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[{"id": str(pid), "name": "x", "species": "cat", "adopted": False}]
+        )
+    )
+    result = await Pet.upsert(
+        name="x", species="cat", adopted=False, ignore_duplicates=True
+    )
+    assert result is not None
+    assert result.id == pid
 
 
 async def test_bulk_upsert_validates_each_row(fake_client):
@@ -600,3 +622,86 @@ async def test_bulk_upsert_accepts_column_list_for_composite(fake_client):
     )
     upsert_call = next(c for c in fake_client.builders[0].calls if c[0] == "upsert")
     assert upsert_call[2]["on_conflict"] == "name,species"
+
+
+# ─── returning= mode (create / bulk_create / upsert / bulk_upsert) ───────
+
+
+async def test_create_default_passes_representation(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[{"id": str(pid), "name": "x", "species": "cat", "adopted": False}]
+        )
+    )
+    obj = await Pet.create(name="x", species="cat", adopted=False)
+    assert obj is not None
+    ins = next(c for c in fake_client.builders[-1].calls if c[0] == "insert")
+    assert ins[2] == {"returning": "representation"}
+
+
+async def test_create_minimal_returns_none_and_sets_kwarg(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    result = await Pet.create(
+        name="x", species="cat", adopted=False, returning="minimal"
+    )
+    assert result is None
+    ins = next(c for c in fake_client.builders[-1].calls if c[0] == "insert")
+    assert ins[2] == {"returning": "minimal"}
+
+
+async def test_bulk_create_minimal_returns_none(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    result = await Pet.bulk_create(
+        [{"name": "a", "species": "cat", "adopted": False}], returning="minimal"
+    )
+    assert result is None
+    ins = next(c for c in fake_client.builders[-1].calls if c[0] == "insert")
+    assert ins[2] == {"returning": "minimal"}
+
+
+async def test_bulk_create_empty_minimal_returns_none(fake_client):
+    assert await Pet.bulk_create([], returning="minimal") is None
+    assert fake_client.builders == []
+
+
+async def test_bulk_create_empty_default_returns_empty_list(fake_client):
+    assert await Pet.bulk_create([]) == []
+    assert fake_client.builders == []
+
+
+async def test_upsert_minimal_returns_none(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    result = await Pet.upsert(
+        name="x", species="cat", adopted=False, returning="minimal"
+    )
+    assert result is None
+    up = next(c for c in fake_client.builders[-1].calls if c[0] == "upsert")
+    assert up[2]["returning"] == "minimal"
+
+
+async def test_bulk_upsert_minimal_returns_none(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    result = await Pet.bulk_upsert(
+        [{"name": "a", "species": "cat", "adopted": False}], returning="minimal"
+    )
+    assert result is None
+
+
+async def test_instance_delete_silently_uses_minimal(fake_client):
+    pid = uuid4()
+    fake_client.queue(
+        FakeResponse(
+            data=[{"id": str(pid), "name": "x", "species": "cat", "adopted": False}]
+        )
+    )
+    pet = await Pet.create(name="x", species="cat", adopted=False)
+    fake_client.queue(FakeResponse(data=None))
+    await pet.delete()
+    d = next(c for c in fake_client.builders[-1].calls if c[0] == "delete")
+    assert d[2] == {"returning": "minimal"}
+
+
+async def test_invalid_returning_raises():
+    with pytest.raises(SupabaseORMUsageError, match="returning must be"):
+        await Pet.create(name="x", species="cat", adopted=False, returning="bogus")  # type: ignore[arg-type]

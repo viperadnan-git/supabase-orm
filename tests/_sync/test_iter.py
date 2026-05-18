@@ -107,6 +107,64 @@ def test_iter_layers_user_filters_on_every_batch(fake_client):
     assert ("eq", ("name", "cat"), {}) in calls
 
 
+# ─── Early cancellation ─────────────────────────────────────────────────
+
+
+def test_iter_break_mid_batch_does_not_fetch_next(fake_client):
+    ids = [uuid4() for _ in range(3)]
+    fake_client.queue(
+        FakeResponse(data=[_row(i, f"R{n}") for n, i in enumerate(ids)]),
+        FakeResponse(data=[]),
+    )
+    seen = []
+    for p in Pet.query.iter(batch_size=3):
+        seen.append(p)
+        break
+    assert len(seen) == 1
+    assert len(fake_client.builders) == 1
+
+
+def test_iter_break_at_batch_boundary_does_not_overfetch(fake_client):
+    ids = [uuid4() for _ in range(4)]
+    fake_client.queue(
+        FakeResponse(data=[_row(i, f"R{n}") for n, i in enumerate(ids[:2])]),
+        FakeResponse(data=[_row(i, f"R{n}") for n, i in enumerate(ids[2:], start=2)]),
+    )
+    seen = []
+    for p in Pet.query.iter(batch_size=2):
+        seen.append(p)
+        if len(seen) == 2:
+            break
+    assert len(seen) == 2
+    assert len(fake_client.builders) == 1
+
+
+def test_iter_explicit_aclose_is_clean(fake_client):
+    fake_client.queue(FakeResponse(data=[_row(uuid4(), "A")]))
+    gen = Pet.query.iter(batch_size=10)
+    first = next(gen)
+    assert first.name == "A"
+    gen.close()
+    # Second aclose() must be a no-op.
+    gen.close()
+
+
+def test_iter_can_restart_after_break(fake_client):
+    a, b = uuid4(), uuid4()
+    fake_client.queue(
+        FakeResponse(data=[_row(a, "A")]),
+        FakeResponse(data=[_row(b, "B")]),
+    )
+    first_pass = []
+    for p in Pet.query.iter(batch_size=10):
+        first_pass.append(p)
+        break
+
+    second_pass = [p for p in Pet.query.iter(batch_size=10)]
+    assert [p.name for p in first_pass] == ["A"]
+    assert [p.name for p in second_pass] == ["B"]
+
+
 # ─── Conflict detection ─────────────────────────────────────────────────
 
 

@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
+from typing import Annotated
+from uuid import UUID, uuid4
+
+from supabase_orm import Relation, SupabaseModel
 
 from .conftest import Owner, Pet, PetWithOwnerInner, PetWithOwnerLeft
+
+
+class PetSlim(SupabaseModel, table="orm_test_pets"):
+    id: UUID
+    name: str
+
+
+class PetSlimWithOwner(PetSlim):
+    owner: Annotated[Owner | None, Relation()] = None
+
+
+class PetSlimAdopted(PetSlim):
+    adopted: bool
+
+
+class PetSlimFull(PetSlimWithOwner, PetSlimAdopted):
+    pass
 
 
 async def test_left_join_includes_orphans(clean):
@@ -52,6 +72,52 @@ async def test_inner_join_drops_orphans(clean):
     )
     rows = await PetWithOwnerInner.query.in_("id", [with_owner.id, orphan.id]).all()
     assert {r.id for r in rows} == {with_owner.id}
+
+
+async def test_projection_chain_select_strings():
+    assert PetSlim.__select__ == "id,name"
+    assert (
+        PetSlimWithOwner.__select__
+        == "id,name,owner:orm_test_owners(id,email,is_active)"
+    )
+    assert PetSlimAdopted.__select__ == "id,name,adopted"
+    # MRO merges owner + adopted into the diamond child.
+    assert (
+        PetSlimFull.__select__
+        == "id,name,adopted,owner:orm_test_owners(id,email,is_active)"
+    )
+
+
+async def test_projection_chain_live_round_trip(clean):
+    owner = await Owner.create(email=f"chain-{uuid4()}@x.test")
+    src = await Pet.create(
+        owner_id=owner.id,
+        name="chainpet",
+        species="cat",
+        adopted=True,
+        tags=[],
+        amount=0,
+    )
+
+    bare = await Pet.query.eq("id", src.id).as_(PetSlim).one()
+    assert isinstance(bare, PetSlim)
+    assert bare.name == "chainpet"
+    assert not hasattr(bare, "owner")
+
+    with_owner = await Pet.query.eq("id", src.id).as_(PetSlimWithOwner).one()
+    assert isinstance(with_owner, PetSlimWithOwner)
+    assert with_owner.owner is not None
+    assert with_owner.owner.email == owner.email
+
+    adopted = await Pet.query.eq("id", src.id).as_(PetSlimAdopted).one()
+    assert isinstance(adopted, PetSlimAdopted)
+    assert adopted.adopted is True
+
+    full = await Pet.query.eq("id", src.id).as_(PetSlimFull).one()
+    assert isinstance(full, PetSlimFull)
+    assert full.adopted is True
+    assert full.owner is not None
+    assert full.owner.email == owner.email
 
 
 async def test_create_with_relations_refetches_with_embed(clean):

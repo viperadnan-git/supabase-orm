@@ -21,7 +21,7 @@ Then chain queries off ``Model.query``:
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Self, TypeVar
+from typing import Any, ClassVar, Literal, Self, TypeVar, overload
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
@@ -29,8 +29,10 @@ from .._embed import Relation, build_select, collect_relations
 from .._exceptions import SupabaseORMDoesNotExist, SupabaseORMUsageError
 from .._filters import compile_value
 from .._predicates import Column, _FieldsAccess
+from .._returning import ReturnMode, validate_returning
 from .._serializers import serialize
 from ._client import get_client
+from ._log import execute_logged
 from ._query import QueryBuilder
 
 _T = TypeVar("_T", bound="SupabaseModel")
@@ -196,31 +198,68 @@ class SupabaseModel(BaseModel):
 
     # ─── Writes ────────────────────────────────────────────────────────────
 
+    @overload
     @classmethod
-    async def create(cls, **values: Any) -> Self:
+    async def create(
+        cls, *, returning: Literal["representation"] = ..., **values: Any
+    ) -> Self: ...
+    @overload
+    @classmethod
+    async def create(cls, *, returning: Literal["minimal"], **values: Any) -> None: ...
+    @classmethod
+    async def create(
+        cls, *, returning: ReturnMode = "representation", **values: Any
+    ) -> Self | None:
         """Insert a row in a single round-trip.
 
-        Uses postgrest's ``insert(...).execute()`` which returns the inserted
-        row. For models with relations we still need a second round-trip to
-        fetch embeds, since ``insert`` only returns columns from the
-        inserted table.
+        ``returning="minimal"`` skips the response body — returns ``None``
+        and avoids the per-row materialization (helpful when RLS forbids
+        SELECT on the row, or for pure side-effect writes).
         """
+        validate_returning(returning)
         payload = {k: serialize(v) for k, v in values.items()}
         client = get_client()
-        ins = await client.table(cls.__table__).insert(payload).execute()
+        ins = await execute_logged(
+            client.table(cls.__table__).insert(payload, returning=returning)
+        )
+        if returning == "minimal":
+            return None
         if not ins.data:
             raise ValueError(f"{cls.__name__}.create returned no rows")
         if cls.__relations__:
             return await cls.get(ins.data[0][cls.__pk__])
         return cls.model_validate(ins.data[0])
 
+    @overload
     @classmethod
-    async def bulk_create(cls, rows: list[dict[str, Any]]) -> list[Self]:
+    async def bulk_create(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        returning: Literal["representation"] = ...,
+    ) -> list[Self]: ...
+    @overload
+    @classmethod
+    async def bulk_create(
+        cls, rows: list[dict[str, Any]], *, returning: Literal["minimal"]
+    ) -> None: ...
+    @classmethod
+    async def bulk_create(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        returning: ReturnMode = "representation",
+    ) -> list[Self] | None:
+        validate_returning(returning)
         if not rows:
-            return []
+            return None if returning == "minimal" else []
         payload = [{k: serialize(v) for k, v in r.items()} for r in rows]
         client = get_client()
-        ins = await client.table(cls.__table__).insert(payload).execute()
+        ins = await execute_logged(
+            client.table(cls.__table__).insert(payload, returning=returning)
+        )
+        if returning == "minimal":
+            return None
         data = ins.data or []
         if not data:
             return []
@@ -234,15 +273,46 @@ class SupabaseModel(BaseModel):
             else [cls.model_validate(r) for r in data]
         )
 
+    @overload
+    @classmethod
+    async def upsert(
+        cls,
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = ...,
+        ignore_duplicates: Literal[False] = ...,
+        returning: Literal["representation"] = ...,
+        **values: Any,
+    ) -> Self: ...
+    @overload
+    @classmethod
+    async def upsert(
+        cls,
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = ...,
+        ignore_duplicates: Literal[True],
+        returning: Literal["representation"] = ...,
+        **values: Any,
+    ) -> Self | None: ...
+    @overload
+    @classmethod
+    async def upsert(
+        cls,
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = ...,
+        ignore_duplicates: bool = ...,
+        returning: Literal["minimal"],
+        **values: Any,
+    ) -> None: ...
     @classmethod
     async def upsert(
         cls,
         *,
         on_conflict: "str | Column | list[str | Column] | None" = None,
         ignore_duplicates: bool = False,
+        returning: ReturnMode = "representation",
         **values: Any,
-    ) -> Self:
-        """Insert or update on conflict. Returns the resulting row.
+    ) -> Self | None:
+        """Insert or update on conflict.
 
         ``on_conflict``: unique-constraint column(s) used to detect duplicates.
         Accepts a typed ``Column`` (e.g. ``Pet.f.email``), a list of columns
@@ -250,22 +320,55 @@ class SupabaseModel(BaseModel):
         string for arbitrary constraints. ``None`` (default) lets PostgREST
         fall back to the table's primary key.
 
-        ``ignore_duplicates=True``: keep the existing row unchanged on conflict
-        (PostgREST does NOT return its data in that case, so this raises if no
-        new row was inserted — call :meth:`find` after if you need the row).
+        ``ignore_duplicates=True``: keep the existing row unchanged on conflict.
+        PostgREST returns no data in that case, so this returns ``None`` —
+        call :meth:`find` after if you need the existing row.
+
+        ``returning="minimal"``: skip the body, return ``None``. Compatible
+        with ``ignore_duplicates=True`` — neither path returns data.
         """
+        validate_returning(returning)
         payload = {k: serialize(v) for k, v in values.items()}
-        kw: dict[str, Any] = {"ignore_duplicates": ignore_duplicates}
+        kw: dict[str, Any] = {
+            "ignore_duplicates": ignore_duplicates,
+            "returning": returning,
+        }
         normalized = _coerce_on_conflict(on_conflict)
         if normalized is not None:
             kw["on_conflict"] = normalized
-        resp = await get_client().table(cls.__table__).upsert(payload, **kw).execute()
+        resp = await execute_logged(
+            get_client().table(cls.__table__).upsert(payload, **kw)
+        )
+        if returning == "minimal":
+            return None
         if not resp.data:
+            if ignore_duplicates:
+                return None
             raise ValueError(f"{cls.__name__}.upsert returned no rows")
         if cls.__relations__:
             return await cls.get(resp.data[0][cls.__pk__])
         return cls.model_validate(resp.data[0])
 
+    @overload
+    @classmethod
+    async def bulk_upsert(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = ...,
+        ignore_duplicates: bool = ...,
+        returning: Literal["representation"] = ...,
+    ) -> list[Self]: ...
+    @overload
+    @classmethod
+    async def bulk_upsert(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        on_conflict: "str | Column | list[str | Column] | None" = ...,
+        ignore_duplicates: bool = ...,
+        returning: Literal["minimal"],
+    ) -> None: ...
     @classmethod
     async def bulk_upsert(
         cls,
@@ -273,16 +376,25 @@ class SupabaseModel(BaseModel):
         *,
         on_conflict: "str | Column | list[str | Column] | None" = None,
         ignore_duplicates: bool = False,
-    ) -> list[Self]:
-        """Bulk-upsert. ``on_conflict`` / ``ignore_duplicates`` as in :meth:`upsert`."""
+        returning: ReturnMode = "representation",
+    ) -> list[Self] | None:
+        """Bulk-upsert. See :meth:`upsert` for parameter semantics."""
+        validate_returning(returning)
         if not rows:
-            return []
+            return None if returning == "minimal" else []
         payload = [{k: serialize(v) for k, v in r.items()} for r in rows]
-        kw: dict[str, Any] = {"ignore_duplicates": ignore_duplicates}
+        kw: dict[str, Any] = {
+            "ignore_duplicates": ignore_duplicates,
+            "returning": returning,
+        }
         normalized = _coerce_on_conflict(on_conflict)
         if normalized is not None:
             kw["on_conflict"] = normalized
-        resp = await get_client().table(cls.__table__).upsert(payload, **kw).execute()
+        resp = await execute_logged(
+            get_client().table(cls.__table__).upsert(payload, **kw)
+        )
+        if returning == "minimal":
+            return None
         data = resp.data or []
         if not data:
             return []
@@ -382,8 +494,8 @@ class SupabaseModel(BaseModel):
         payload = {f: serialize(getattr(self, f)) for f in dirty}
         client = get_client()
         pk_val = serialize(getattr(self, cls.__pk__))
-        resp = await (
-            client.table(cls.__table__).update(payload).eq(cls.__pk__, pk_val).execute()
+        resp = await execute_logged(
+            client.table(cls.__table__).update(payload).eq(cls.__pk__, pk_val)
         )
         if not resp.data:
             raise SupabaseORMDoesNotExist(
@@ -402,11 +514,10 @@ class SupabaseModel(BaseModel):
         """Delete this single row by primary key."""
         cls = type(self)
         client = get_client()
-        await (
+        await execute_logged(
             client.table(cls.__table__)
-            .delete()
+            .delete(returning="minimal")
             .eq(cls.__pk__, serialize(getattr(self, cls.__pk__)))
-            .execute()
         )
 
     async def refresh(self) -> Self:

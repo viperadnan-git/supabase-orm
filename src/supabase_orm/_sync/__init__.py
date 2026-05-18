@@ -19,8 +19,10 @@ from .._exceptions import (
     SupabaseORMMultipleObjectsReturned,
     SupabaseORMUsageError,
 )
+from .._explain import ExplainResult
 from .._filters import register_op
 from .._predicates import Column, Order, Predicate
+from .._returning import ReturnMode
 from .._serializers import register_serializer, serialize
 from .._version import __version__
 from ._base import SupabaseModel
@@ -32,10 +34,12 @@ __all__ = [
     "__version__",
     "SupabaseModel",
     "Relation",
+    "ExplainResult",
     "QueryBuilder",
     "Column",
     "Predicate",
     "Order",
+    "ReturnMode",
     "lifespan",
     "init",
     "shutdown",

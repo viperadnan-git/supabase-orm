@@ -265,7 +265,7 @@ async def test_delete_with_filter_runs(fake_client):
     del_builder = next(
         b for b in fake_client.builders if any(c[0] == "delete" for c in b.calls)
     )
-    assert ("delete", (), {}) in del_builder.calls
+    assert ("delete", (), {"returning": "representation"}) in del_builder.calls
     assert ("eq", ("is_active", False), {}) in del_builder.calls
 
 
@@ -275,7 +275,7 @@ async def test_delete_allow_unfiltered(fake_client):
     del_builder = next(
         b for b in fake_client.builders if any(c[0] == "delete" for c in b.calls)
     )
-    assert ("delete", (), {}) in del_builder.calls
+    assert ("delete", (), {"returning": "representation"}) in del_builder.calls
 
 
 async def test_update_requires_filter(fake_client):
@@ -453,3 +453,35 @@ async def test_raw_returns_builder_with_relation_filters_applied(fake_client):
     # raw() applies relation filters but does not call execute.
     filters = [c for c in b.calls if c[0] == "filter"]
     assert any(f[1][0] == "author.is_active" for f in filters)
+
+
+# ─── QueryBuilder.update/delete returning= mode ─────────────────────────
+
+
+async def test_query_update_minimal_returns_none(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    result = await User.query.eq("is_active", True).update(
+        email="y@x.test", returning="minimal"
+    )
+    assert result is None
+    up = next(c for c in fake_client.builders[-1].calls if c[0] == "update")
+    assert up[2]["returning"] == "minimal"
+
+
+async def test_query_delete_minimal_returns_none(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    result = await User.query.eq("is_active", True).delete(returning="minimal")
+    assert result is None
+    d = next(c for c in fake_client.builders[-1].calls if c[0] == "delete")
+    assert d[2]["returning"] == "minimal"
+
+
+async def test_query_delete_default_passes_representation(fake_client):
+    uid = uuid4()
+    fake_client.queue(
+        FakeResponse(data=[{"id": str(uid), "email": "a@b.c", "is_active": True}])
+    )
+    rows = await User.query.eq("is_active", True).delete()
+    assert len(rows) == 1
+    d = next(c for c in fake_client.builders[-1].calls if c[0] == "delete")
+    assert d[2]["returning"] == "representation"

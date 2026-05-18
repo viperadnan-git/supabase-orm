@@ -16,7 +16,17 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Callable, Generic, Self, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Literal,
+    Self,
+    TypeVar,
+    cast,
+    overload,
+)
 
 
 class _Op(StrEnum):
@@ -49,10 +59,14 @@ from .._exceptions import (
     SupabaseORMMultipleObjectsReturned,
     SupabaseORMUsageError,
 )
+from .._explain import ExplainResult
+from .._explain import from_builder as _explain_from_builder
 from .._filters import apply_op, compile_predicate
 from .._predicates import Column, Order, Predicate
+from .._returning import ReturnMode, validate_returning
 from .._serializers import serialize
 from ._client import get_client
+from ._log import execute_logged
 
 if TYPE_CHECKING:
     from ._base import SupabaseModel
@@ -245,6 +259,31 @@ def _compile_branches(
     return ",".join(parts)
 
 
+def _fmt_op(op: tuple) -> str:
+    """Format a single recorded op-log tuple for ``QueryBuilder.__repr__``."""
+    kind = op[0]
+    if kind is _Op.OP:
+        return f"{op[1]}({op[2]!r}, {op[3]!r})"
+    if kind is _Op.OR:
+        return f"or({op[1]})"
+    if kind is _Op.MATCH:
+        return f"match({op[1]!r})"
+    if kind is _Op.ORDER:
+        o = op[1]
+        d = "desc" if o.desc else "asc"
+        n = f" nulls={o.nulls}" if o.nulls else ""
+        return f"order({o.column}.{d}{n})"
+    if kind is _Op.LIMIT:
+        return f"limit({op[1]})"
+    if kind is _Op.OFFSET:
+        return f"offset({op[1]})"
+    if kind is _Op.RANGE:
+        return f"range({op[1]}, {op[2]})"
+    if kind is _Op.FILTER:
+        return f"filter({op[1]!r}, {op[2]!r}, {op[3]!r})"
+    return str(op)
+
+
 def _coerce_order(spec: "str | Column | Order") -> Order:
     """Normalize an ``order_by`` arg to an :class:`Order` instance."""
     if isinstance(spec, Order):
@@ -279,6 +318,12 @@ class QueryBuilder(_Filterable, Generic[T]):
         # fresh and replay this log — so chains built before a
         # ``use_client()`` block still see the current binding at execute time.
         self._ops: list[tuple] = []
+
+    def __repr__(self) -> str:
+        parts = [f"QueryBuilder[{self._model.__name__}]", f"select={self._select!r}"]
+        if self._ops:
+            parts.append(f"ops=[{', '.join(_fmt_op(op) for op in self._ops)}]")
+        return f"<{' '.join(parts)}>"
 
     # ─── Filter mixin hooks ────────────────────────────────────────────────
 
@@ -407,8 +452,15 @@ class QueryBuilder(_Filterable, Generic[T]):
         if not columns:
             raise SupabaseORMUsageError(".values() requires at least one column.")
         b = self._make_select(select=",".join(columns))
-        resp = b.execute()
+        resp = execute_logged(b)
         return resp.data or []
+
+    # ─── Debug ─────────────────────────────────────────────────────────────
+
+    def explain(self, *, redact: bool = True) -> ExplainResult:
+        """Resolved HTTP request — no execute. Auth headers redacted unless
+        ``redact=False``."""
+        return _explain_from_builder(self._make_select(), redact=redact)
 
     # ─── Escape hatch ──────────────────────────────────────────────────────
 
@@ -485,7 +537,7 @@ class QueryBuilder(_Filterable, Generic[T]):
     # ─── Read terminals ────────────────────────────────────────────────────
 
     def all(self) -> list[T]:
-        resp = self._make_select().execute()
+        resp = execute_logged(self._make_select())
         return self._validate_rows(resp.data or [])
 
     def all_with_count(self) -> tuple[list[T], int]:
@@ -495,7 +547,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         ``count="exact"`` is computed on the FILTERED row set, ignoring
         ``limit``/``offset``, which is the standard pagination semantics.
         """
-        resp = self._make_select(count="exact").execute()
+        resp = execute_logged(self._make_select(count="exact"))
         rows = self._validate_rows(resp.data or [])
         return rows, getattr(resp, "count", None) or 0
 
@@ -503,7 +555,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         """Run the query with an ad-hoc ``.limit(n)`` without polluting
         the op log — so ``first()``/``one()``/``maybe_one()`` are
         idempotent on repeat calls."""
-        resp = self._make_select().limit(n).execute()
+        resp = execute_logged(self._make_select().limit(n))
         return self._validate_rows(resp.data or [])
 
     def first(self) -> T | None:
@@ -535,7 +587,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         """Count matching rows on a fresh head-only request, replaying the
         recorded op log so filters (including relation filters) are honored."""
         b = self._make_select(select="*", count="exact", head=True)
-        resp = b.execute()
+        resp = execute_logged(b)
         return getattr(resp, "count", None) or 0
 
     def exists(self) -> bool:
@@ -547,7 +599,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         total.
         """
         b = self._make_select(select=self._model.__pk__).limit(1)
-        resp = b.execute()
+        resp = execute_logged(b)
         return bool(resp.data)
 
     def iter(self, *, batch_size: int = 1000) -> Iterator[T]:
@@ -592,7 +644,7 @@ class QueryBuilder(_Filterable, Generic[T]):
             if cursor is not None:
                 b = b.gt(pk, serialize(cursor))
             b = b.order(pk, desc=False).limit(batch_size)
-            resp = b.execute()
+            resp = execute_logged(b)
             data = resp.data or []
             if not data:
                 return
@@ -607,30 +659,76 @@ class QueryBuilder(_Filterable, Generic[T]):
 
     # ─── Write terminals ───────────────────────────────────────────────────
 
-    def delete(self, *, allow_unfiltered: bool = False) -> list[T]:
-        """Bulk-delete every matching row. Returns the deleted rows.
+    @overload
+    def delete(
+        self,
+        *,
+        allow_unfiltered: bool = ...,
+        returning: Literal["representation"] = ...,
+    ) -> list[T]: ...
+    @overload
+    def delete(
+        self, *, allow_unfiltered: bool = ..., returning: Literal["minimal"]
+    ) -> None: ...
+    def delete(
+        self,
+        *,
+        allow_unfiltered: bool = False,
+        returning: ReturnMode = "representation",
+    ) -> list[T] | None:
+        """Bulk-delete every matching row.
+
+        ``returning="minimal"``: skip the response body and return ``None``.
 
         Raises ``SupabaseORMUsageError`` if no filter has been chained
         unless ``allow_unfiltered=True`` is passed explicitly. PostgREST also
         rejects unfiltered DELETE by default at the server.
         """
+        validate_returning(returning)
         if not allow_unfiltered and not self._has_filter():
             raise SupabaseORMUsageError(
                 "Refusing unfiltered .delete() — chain at least one filter or "
                 "pass allow_unfiltered=True to wipe the table."
             )
-        b = get_client().table(self._model.__table__).delete()
+        b = get_client().table(self._model.__table__).delete(returning=returning)
         b = self._replay(b)
         b = self._apply_relation_filters_on(b)
-        resp = b.execute()
+        resp = execute_logged(b)
+        if returning == "minimal":
+            return None
         return self._validate_rows(resp.data or [])
 
-    def update(self, *, allow_unfiltered: bool = False, **values: Any) -> list[T]:
-        """Bulk-update every matching row. Returns the updated rows.
+    @overload
+    def update(
+        self,
+        *,
+        allow_unfiltered: bool = ...,
+        returning: Literal["representation"] = ...,
+        **values: Any,
+    ) -> list[T]: ...
+    @overload
+    def update(
+        self,
+        *,
+        allow_unfiltered: bool = ...,
+        returning: Literal["minimal"],
+        **values: Any,
+    ) -> None: ...
+    def update(
+        self,
+        *,
+        allow_unfiltered: bool = False,
+        returning: ReturnMode = "representation",
+        **values: Any,
+    ) -> list[T] | None:
+        """Bulk-update every matching row.
+
+        ``returning="minimal"``: skip the response body and return ``None``.
 
         Raises ``SupabaseORMUsageError`` if no filter has been chained
         unless ``allow_unfiltered=True`` is passed explicitly.
         """
+        validate_returning(returning)
         if not allow_unfiltered and not self._has_filter():
             raise SupabaseORMUsageError(
                 "Refusing unfiltered .update() — chain at least one filter or "
@@ -641,10 +739,16 @@ class QueryBuilder(_Filterable, Generic[T]):
                 "update() requires at least one key=value to set."
             )
         payload = {k: serialize(v) for k, v in values.items()}
-        b = get_client().table(self._model.__table__).update(payload)
+        b = (
+            get_client()
+            .table(self._model.__table__)
+            .update(payload, returning=returning)
+        )
         b = self._replay(b)
         b = self._apply_relation_filters_on(b)
-        resp = b.execute()
+        resp = execute_logged(b)
+        if returning == "minimal":
+            return None
         return self._validate_rows(resp.data or [])
 
     # ─── Helpers ───────────────────────────────────────────────────────────

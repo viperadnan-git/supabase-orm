@@ -30,7 +30,7 @@
 
 - **Opt-in foot-gun guards.** Unfiltered bulk `delete()` / `update()` raise unless you pass `allow_unfiltered=True`.
 
-- **Tested both ways.** 440+ mock tests (async + sync trees) cover the wire contract — every operator, every serializer, every shorthand, predicate composition, keyset iteration. 60+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
+- **Tested both ways.** 500+ mock tests (async + sync trees) cover the wire contract — every operator, every serializer, every shorthand, predicate composition, keyset iteration. 80+ integration tests run against a real Supabase project to confirm PostgREST actually interprets those calls the way we expect.
 
 ---
 
@@ -230,10 +230,12 @@ If a same-table SupabaseModel target works, prefer it — you get the wire-narro
 | `.one()`              | `T`                    | Exactly one row. Raises if 0 or >1.                                     |
 | `.maybe_one()`        | `T \| None`            | At most one row. Raises if >1.                                          |
 | `.count()`            | `int`                  | Head-only request with `count="exact"`.                                 |
+| `.exists()`           | `bool`                 | `limit(1)` on the PK column. Cheap; no validation, no count.            |
 | `.all_with_count()`   | `tuple[list[T], int]`  | Rows + filtered total in one round-trip (for paginated endpoints).      |
 | `.iter(batch_size=)`  | `AsyncIterator[T]`     | Stream every matching row via PK keyset pagination. Scales to any size. |
 | `.values(*cols)`      | `list[dict]`           | Ad-hoc projection, raw dicts, no Pydantic validation.                   |
 | `.raw()`              | postgrest builder      | Escape hatch.                                                           |
+| `.explain()`          | `ExplainResult`        | Resolved HTTP method/URL/params/headers — no execute.                   |
 
 ### Filter operators
 
@@ -430,6 +432,29 @@ await Pet.upsert(name="Whiskers", species="cat", on_conflict=Pet.f.name)
 await Pet.upsert(..., on_conflict=[Pet.f.name, Pet.f.species])     # composite
 await Pet.bulk_upsert([{...}, {...}], on_conflict="name,species")  # bulk
 ```
+
+`ignore_duplicates=True` keeps the existing row on conflict. Returns `None` (no body) — the return type narrows to `Self | None` via overload.
+
+```python
+result = await Pet.upsert(email=email, on_conflict="email", ignore_duplicates=True)
+if result is None:
+    # row already existed
+    ...
+```
+
+### `returning="minimal"` — skip the response body
+
+Every write method accepts `returning="minimal"`. Saves a round-trip body, sidesteps RLS-on-SELECT, and tightens the return type to `None` via `@overload`.
+
+```python
+await Pet.create(name="x", species="cat", adopted=False, returning="minimal")
+await Pet.bulk_create([...], returning="minimal")
+await Pet.upsert(..., returning="minimal")
+await Pet.query.eq("species", "cat").update(adopted=True, returning="minimal")
+await Pet.query.eq("species", "cat").delete(returning="minimal")
+```
+
+`instance.delete()` uses `minimal` unconditionally (we discard the body anyway). `save()` / `instance.update()` always need the body to refresh local state — passing `returning="minimal"` to them is a `SupabaseORMUsageError`.
 
 ### Get-or-create / update-or-create
 
@@ -700,6 +725,33 @@ from fastapi.responses import JSONResponse
 @app.exception_handler(SupabaseORMDoesNotExist)
 async def not_found(request: Request, exc: SupabaseORMDoesNotExist):
     return JSONResponse({"detail": str(exc)}, status_code=404)
+```
+
+---
+
+## Debugging
+
+`QueryBuilder.__repr__` shows the recorded chain without needing a client:
+
+```python
+>>> Pet.query.eq("species", "cat").limit(10)
+<QueryBuilder[Pet] select='id,name,species,adopted' ops=[eq('species', 'cat'), limit(10)]>
+```
+
+`.explain()` returns the resolved HTTP request — method, URL, params, headers — without executing. Auth headers (`apikey`, `Authorization`) are redacted by default.
+
+```python
+print(Pet.query.eq("species", "cat").limit(10).explain())
+# GET http://.../rest/v1/pets?select=id%2Cname%2C...&species=eq.cat&limit=10
+#   apikey: ***REDACTED***
+#   ...
+```
+
+Per-query logging emits at `logging.getLogger("supabase_orm.query")` (DEBUG level), one record per executed query with method, full URL, and elapsed ms. Disabled by default; opt in by raising the level:
+
+```python
+import logging
+logging.getLogger("supabase_orm.query").setLevel(logging.DEBUG)
 ```
 
 ---

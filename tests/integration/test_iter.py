@@ -76,7 +76,6 @@ async def test_iter_consistent_with_all(clean):
 
 
 async def test_iter_break_stops_cleanly(clean):
-    """Breaking out of the loop early shouldn't error or fetch more."""
     await Owner.bulk_create([{"email": f"br-{uuid4()}@x.test"} for _ in range(20)])
     seen = 0
     async for _ in Owner.query.like("email", "br-%").iter(batch_size=5):
@@ -84,6 +83,29 @@ async def test_iter_break_stops_cleanly(clean):
         if seen >= 3:
             break
     assert seen == 3
+
+
+async def test_iter_state_clean_after_break(clean):
+    await Owner.bulk_create([{"email": f"st-{uuid4()}@x.test"} for _ in range(10)])
+
+    partial = 0
+    async for _ in Owner.query.like("email", "st-%").iter(batch_size=4):
+        partial += 1
+        if partial >= 2:
+            break
+
+    full = [o async for o in Owner.query.like("email", "st-%").iter(batch_size=4)]
+    assert len(full) == 10
+    assert await Owner.query.like("email", "st-%").count() == 10
+
+
+async def test_iter_explicit_aclose_against_live_client(clean):
+    await Owner.bulk_create([{"email": f"ac-{uuid4()}@x.test"} for _ in range(6)])
+    gen = Owner.query.like("email", "ac-%").iter(batch_size=2)
+    first = await anext(gen)
+    assert first.email.startswith("ac-")
+    await gen.aclose()
+    await gen.aclose()
 
 
 async def test_iter_rejects_chained_pagination_at_call_time(clean):

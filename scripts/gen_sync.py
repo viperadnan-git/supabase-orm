@@ -25,6 +25,7 @@ ADDITIONAL_REPLACEMENTS = {
     "AsyncClient": "Client",
     "acreate_client": "create_client",
     "aclose": "close",
+    "anext": "next",
     "_async": "_sync",
 }
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from .._serializers import serialize
 from ._client import get_client
+from ._log import execute_logged
 
 T = TypeVar("T", bound=BaseModel)
 S = TypeVar("S")
@@ -49,7 +50,7 @@ def _serialize_params(params: dict[str, Any]) -> dict[str, Any]:
 
 async def rpc(name: str, model: type[T], **params: Any) -> list[T]:
     """Call a Postgres function returning ``setof``. Validates each row."""
-    resp = await get_client().rpc(name, _serialize_params(params)).execute()
+    resp = await execute_logged(get_client().rpc(name, _serialize_params(params)))
     rows = resp.data or []
     if not isinstance(rows, list):
         rows = [rows]
@@ -70,5 +71,5 @@ async def rpc_maybe_one(name: str, model: type[T], **params: Any) -> T | None:
 
 async def rpc_scalar(name: str, result_type: type[S], **params: Any) -> S:
     """Call a function returning a scalar (int, str, bool, ...)."""
-    resp = await get_client().rpc(name, _serialize_params(params)).execute()
+    resp = await execute_logged(get_client().rpc(name, _serialize_params(params)))
     return _scalar_adapter(result_type).validate_python(resp.data)
