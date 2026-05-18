@@ -61,9 +61,7 @@ ruff = { cmd = "uvx ruff check --fix {staged_files} && uvx ruff format {staged_f
 [tool.ruff.lint]
 select = ["F", "I", "D"]
 fixable = ["F401", "I", "D"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
+pydocstyle = { convention = "google" }
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D"]
