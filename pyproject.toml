@@ -38,7 +38,7 @@ Issues = "https://github.com/viperadnan-git/supabase-orm/issues"
 Documentation = "https://viperadnan-git.github.io/supabase-orm/"
 
 [build-system]
-requires = ["hatchling", "hatch-vcs", "unasync>=0.6"]
+requires = ["hatchling", "hatch-vcs", "unasync>=0.6", "ruff>=0.15.12"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
