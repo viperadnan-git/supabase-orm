@@ -35,7 +35,7 @@ dependencies = [
 Homepage = "https://github.com/viperadnan-git/supabase-orm"
 Repository = "https://github.com/viperadnan-git/supabase-orm"
 Issues = "https://github.com/viperadnan-git/supabase-orm/issues"
-Documentation = "https://github.com/viperadnan-git/supabase-orm#readme"
+Documentation = "https://viperadnan-git.github.io/supabase-orm/"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "unasync>=0.6"]

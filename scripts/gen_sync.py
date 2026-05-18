@@ -146,7 +146,11 @@ def _render_file(rule: _ProseRule, filepath: Path) -> tuple[Path, bytes]:
 
 
 def _format_with_ruff(outputs: dict[Path, bytes]) -> dict[Path, bytes]:
-    """Pipe each generated file through ``ruff format``. No-op on missing ruff."""
+    """Pipe each generated file through ``ruff check --fix`` then ``ruff format``.
+
+    Lint-fix runs first so import-sort (``I``) and unused-import (``F401``)
+    fixes apply before formatting normalizes the result. No-op on missing ruff.
+    """
     try:
         subprocess.run(["ruff", "--version"], capture_output=True, check=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
@@ -155,15 +159,29 @@ def _format_with_ruff(outputs: dict[Path, bytes]) -> dict[Path, bytes]:
     formatted: dict[Path, bytes] = {}
     for path, content in outputs.items():
         try:
+            fixed = subprocess.run(
+                [
+                    "ruff",
+                    "check",
+                    "--fix",
+                    "--exit-zero",
+                    "--stdin-filename",
+                    str(path),
+                    "-",
+                ],
+                input=content,
+                capture_output=True,
+                check=True,
+            ).stdout
             proc = subprocess.run(
                 ["ruff", "format", "--stdin-filename", str(path), "-"],
-                input=content,
+                input=fixed,
                 capture_output=True,
                 check=True,
             )
             formatted[path] = proc.stdout
         except subprocess.CalledProcessError as exc:
-            sys.stderr.write(f"ruff format failed on {path}:\n{exc.stderr.decode()}\n")
+            sys.stderr.write(f"ruff failed on {path}:\n{exc.stderr.decode()}\n")
             raise
     return formatted
 
@@ -175,7 +193,7 @@ def _render_all() -> dict[Path, bytes]:
             out_path, content = _render_file(rule, src)
             outputs[out_path] = content
     if not outputs:
-        raise SystemExit("gen_sync: no source files found under _async/ dirs.")
+        raise SystemExit("Sync generator: no source files found under _async/ dirs.")
     return _format_with_ruff(outputs)
 
 
@@ -201,7 +219,7 @@ def _check(outputs: dict[Path, bytes]) -> int:
     if not drift:
         return 0
     sys.stderr.write(
-        "gen_sync: drift detected. The following generated files are stale "
+        "Sync generator: drift detected. The following generated files are stale "
         "(run `python scripts/gen_sync.py` to regenerate):\n"
     )
     for path in drift:
@@ -230,7 +248,11 @@ def cli(argv: list[str] | None = None) -> int:
         return _check(outputs)
     changed = _write_if_changed(outputs)
     if changed:
-        sys.stderr.write(f"gen_sync: wrote {len(changed)} file(s).\n")
+        sys.stderr.write(f"Sync generator: wrote {len(changed)} file(s):\n")
+        for path in changed:
+            sys.stderr.write(f"  {path.relative_to(ROOT)}\n")
+    else:
+        sys.stderr.write("Sync generator: already up to date.\n")
     return 0
 
 
