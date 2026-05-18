@@ -218,6 +218,28 @@ def test_count_none_returns_zero(fake_client):
     assert User.query.eq("is_active", True).count() == 0
 
 
+def test_exists_true_when_row_returned(fake_client):
+    fake_client.queue(FakeResponse(data=[{"id": str(uuid4())}]))
+    assert User.query.eq("is_active", True).exists() is True
+    b = fake_client.builders[-1]
+    select_call = next(c for c in b.calls if c[0] == "select")
+    # Projects PK only — no count, no head.
+    assert select_call[1] == ("id",)
+    assert "count" not in select_call[2] and "head" not in select_call[2]
+    assert ("limit", (1,), {}) in b.calls
+    assert ("eq", ("is_active", True), {}) in b.calls
+
+
+def test_exists_false_on_empty(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    assert User.query.eq("is_active", True).exists() is False
+
+
+def test_exists_false_on_none(fake_client):
+    fake_client.queue(FakeResponse(data=None))
+    assert User.query.exists() is False
+
+
 def test_all_with_count_returns_pair(fake_client):
     uid = uuid4()
     fake_client.queue(

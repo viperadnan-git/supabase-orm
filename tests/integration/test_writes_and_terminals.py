@@ -110,6 +110,15 @@ async def test_count(clean):
     assert await Owner.query.like("email", "cnt-%").count() == 4
 
 
+async def test_exists_true(clean):
+    await Owner.create(email=f"exists-{uuid4()}@x.test")
+    assert await Owner.query.like("email", "exists-%").exists() is True
+
+
+async def test_exists_false(clean):
+    assert await Owner.query.eq("email", f"nope-{uuid4()}@x.test").exists() is False
+
+
 async def test_all_with_count(clean):
     await Owner.bulk_create([{"email": f"awc-{i}-{uuid4()}@x.test"} for i in range(5)])
     rows, total = (

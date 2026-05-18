@@ -535,6 +535,18 @@ class QueryBuilder(_Filterable, Generic[T]):
         resp = await b.execute()
         return getattr(resp, "count", None) or 0
 
+    async def exists(self) -> bool:
+        """Return ``True`` iff at least one row matches the current filters.
+
+        Wire shape: ``select=<pk>&limit=1`` — projects the PK only, fetches
+        at most one row, skips Pydantic validation. Cheap on tables of any
+        size, and unlike ``count() > 0`` does not ask Postgres for an exact
+        total.
+        """
+        b = self._make_select(select=self._model.__pk__).limit(1)
+        resp = await b.execute()
+        return bool(resp.data)
+
     def iter(self, *, batch_size: int = 1000) -> AsyncIterator[T]:
         """Yield every matching row using PK keyset pagination.
 
