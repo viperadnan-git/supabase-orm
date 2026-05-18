@@ -1,0 +1,15 @@
+/* Supabase dark emerald — primary brand color, both schemes. */
+:root,
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        #249361;
+  --md-primary-fg-color--light: #3ECF8E;
+  --md-primary-fg-color--dark:  #1A6E48;
+  --md-accent-fg-color:         #3ECF8E;
+}
+
+/* Breathing room between mkdocstrings-rendered method blocks. */
+.md-typeset .doc.doc-object,
+.md-typeset .doc.doc-function,
+.md-typeset .doc.doc-class {
+  margin-bottom: 4em;
+}
