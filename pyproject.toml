@@ -55,7 +55,7 @@ path = "scripts/hatch_build.py"
 packages = ["src/supabase_orm"]
 
 [tool.nizm.hooks]
-gen_sync = { cmd = "uv run python scripts/gen_sync.py", glob = "**/_async/**/*.py", outputs = ["**/_sync/**/*.py"] }
+gen_sync = { cmd = "uv run python scripts/gen_sync.py", glob = ["**/_async/**/*.py", "scripts/gen_sync.py"], outputs = "**/_sync/**/*.py" }
 ruff = { cmd = "uvx ruff check --fix {staged_files} && uvx ruff format {staged_files}", glob = "*.py" }
 
 [tool.ruff.lint]
