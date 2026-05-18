@@ -4,7 +4,7 @@
 
 ### A lightweight, Pydantic-native ORM on top of `supabase-py` — async-first, sync mirror generated.
 
-**[Documentation](https://viperadnan-git.github.io/supabase-orm/)** · [Install](#install) · [Quick start](#quick-start) · [Sync mode](#sync-mode) · [Contributing](#contributing)
+**[Documentation](https://supabase-orm.readthedocs.io/)** · [Install](#install) · [Quick start](#quick-start) · [Sync mode](#sync-mode) · [Contributing](#contributing)
 
 </div>
 
@@ -12,16 +12,16 @@
 
 ## Features
 
-- **Type-safe query builder.** Every operator on `Model.query` is a real method with a real signature — autocomplete works, typos surface as `AttributeError` at call time, not as silent server-side errors.
-- **Typed predicate expressions.** `Pet.f.age >= 5` builds a composable `Predicate`. Combine with `|` / `&` / `~` and pass to `.or_()` / `.not_()`.
-- **Keyset iteration that scales.** `async for pet in Pet.query.eq(...).iter():` paginates by PK with constant-time-per-batch, race-safe under concurrent inserts/deletes.
-- **Pydantic v2 throughout.** Your model *is* the row schema, the response schema, and the request body schema. No DTO layer.
-- **Async-first, sync mirror included.** Built for `asyncio` and FastAPI; a byte-for-byte sync API lives at `supabase_orm.sync`, generated via `unasync`.
-- **PostgREST embeds, declared at the type level.** Annotate a field as `Annotated[Owner, Relation(...)]` — the ORM builds the right `select=` string for you, including `!inner` / FK hints / per-relation filters.
-- **Per-request RLS via `ContextVar`.** Pair `use_client()` with a JWT-authenticated client in a FastAPI middleware — zero leakage between concurrent requests.
-- **Typed RPC helpers.** Call `setof` functions with row validation, get a single row, or coerce a scalar — one line each.
-- **Foot-gun guards.** Unfiltered bulk `delete()` / `update()` raise unless you pass `allow_unfiltered=True`.
-- **Tested both ways.** 500+ mock tests cover the wire contract; 80+ integration tests run against real Supabase.
+- **Pydantic models are tables.** One class is your schema, validator, and query entry point — no separate DTO layer.
+- **Typed query builder.** `Model.query.eq(...).gte(...)` autocompletes; typos raise at call time, not server-side.
+- **Composable predicates.** `Pet.f.age >= 5` builds a `Predicate`; combine with `|` / `&` / `~`, pass to `.or_()` / `.not_()`.
+- **Declarative embeds.** Annotate `Annotated[Owner, Relation(...)]` — the right `select=` string + `!inner` / FK hints are inferred.
+- **Keyset iteration.** `async for pet in Pet.query.iter():` — constant-time per batch, race-safe under concurrent writes, any table size.
+- **Async + sync.** Async-first for FastAPI; a byte-for-byte sync mirror at `supabase_orm.sync` is generated via `unasync`.
+- **Typed RPC.** Call PostgREST functions with row validation, single-row, or scalar coercion in one line.
+- **Per-request RLS.** `use_client()` with a JWT-authenticated client in a FastAPI middleware — zero leakage between concurrent requests.
+- **Safe by default.** Unfiltered bulk `delete()` / `update()` raise unless you opt in explicitly.
+- **Battle-tested.** 500+ mock tests for the wire contract; 80+ integration tests against real Supabase.
 
 ---
 
@@ -82,7 +82,7 @@ async with lifespan(SUPABASE_URL, SUPABASE_KEY):
     await Pet.query.eq("adopted", False).update(adopted=True)
 ```
 
-Full guide: **[viperadnan-git.github.io/supabase-orm](https://viperadnan-git.github.io/supabase-orm/)** — models, predicates, embeds, lifecycle, RPC, extending.
+Full guide: **[https://supabase-orm.readthedocs.io](https://supabase-orm.readthedocs.io)** — models, predicates, embeds, lifecycle, RPC, extending.
 
 ---
 

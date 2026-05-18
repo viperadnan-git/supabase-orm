@@ -52,7 +52,13 @@ def _serialize_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def rpc(name: str, model: type[T], **params: Any) -> list[T]:
-    """Call a Postgres function returning ``setof``. Validates each row."""
+    """Call a Postgres function returning ``setof``. Validates each row.
+
+    Args:
+        name: SQL function name (must exist in the configured schema).
+        model: Pydantic model used to validate each returned row.
+        **params: Named arguments — must match the function's parameter names.
+    """
     resp = execute_logged(get_client().rpc(name, _serialize_params(params)))
     rows = resp.data or []
     if not isinstance(rows, list):
@@ -61,6 +67,13 @@ def rpc(name: str, model: type[T], **params: Any) -> list[T]:
 
 
 def rpc_one(name: str, model: type[T], **params: Any) -> T:
+    """Like :func:`rpc` but expects exactly one row; raises otherwise.
+
+    Args:
+        name: SQL function name.
+        model: Pydantic model used to validate the row.
+        **params: Named arguments matching the function signature.
+    """
     rows = rpc(name, model, **params)
     if not rows:
         raise ValueError(f"rpc({name!r}) returned no rows")
@@ -68,11 +81,24 @@ def rpc_one(name: str, model: type[T], **params: Any) -> T:
 
 
 def rpc_maybe_one(name: str, model: type[T], **params: Any) -> T | None:
+    """Like :func:`rpc` but returns the first row, or ``None`` if empty.
+
+    Args:
+        name: SQL function name.
+        model: Pydantic model used to validate the row.
+        **params: Named arguments matching the function signature.
+    """
     rows = rpc(name, model, **params)
     return rows[0] if rows else None
 
 
 def rpc_scalar(name: str, result_type: type[S], **params: Any) -> S:
-    """Call a function returning a scalar (int, str, bool, ...)."""
+    """Call a function returning a scalar (int, str, bool, ...).
+
+    Args:
+        name: SQL function name.
+        result_type: The scalar Python type to coerce the result into.
+        **params: Named arguments matching the function signature.
+    """
     resp = execute_logged(get_client().rpc(name, _serialize_params(params)))
     return _scalar_adapter(result_type).validate_python(resp.data)

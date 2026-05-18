@@ -68,9 +68,11 @@ def get_client() -> Client:
 
 
 def set_client(client: Client | None) -> None:
-    """Bind ``client`` as the app-wide default. Caller retains ownership —
+    """Bind ``client`` as the app-wide default; caller keeps ownership.
+
     ``shutdown()`` unbinds but does not close. For ownership transfer use
-    :func:`init`."""
+    :func:`init`.
+    """
     global _default_client
     _default_client = client
 

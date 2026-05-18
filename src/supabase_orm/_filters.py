@@ -41,16 +41,30 @@ def register_op(
     builder: BuilderCall | None = None,
     predicate: ValueFormatter | None = None,
 ) -> Callable[[BuilderCall], BuilderCall] | BuilderCall:
-    """Register an operator.
+    """Register a filter operator (decorator or callable).
 
-    ``name`` is the Python method name (used as ``Model.<name>(col, val)``).
-    ``wire`` is the PostgREST operator string used in ``or=(col.OP.val)``
-    predicate groups. Defaults to ``name``. Override when ``name`` collides
-    with a Python keyword — e.g. ``register_op("in_", wire="in")``.
+    Used as a decorator::
 
-    ``predicate`` is a value-only formatter ``(val) -> str``. Defaults to
-    :func:`_pred_value` (handles scalars, sequences, comma-quoting). Override
-    for ops that need a different value shape — e.g. arrays use ``{a,b,c}``.
+        @register_op("starts_with")
+        def starts_with(b, col, val): return b.like(col, f"{val}%")
+
+    Or directly::
+
+        register_op("starts_with", builder=starts_with)
+
+    Args:
+        name: Python method name exposed as ``Model.query.<name>(col, val)``.
+        wire: PostgREST operator string for predicate groups (``col.OP.val``).
+            Defaults to ``name``. Override when ``name`` collides with a Python
+            keyword — e.g. ``register_op("in_", wire="in")``.
+        builder: The implementation function. Omit when using as a decorator.
+        predicate: Value-only formatter ``(val) -> str`` for predicate strings.
+            Defaults to :func:`_pred_value` (handles scalars, sequences,
+            comma-quoting). Override for ops with a non-standard value shape.
+
+    Returns:
+        The registered function (decorator mode) or a decorator (when
+        ``builder`` is omitted).
     """
     wire_name = wire or name
 

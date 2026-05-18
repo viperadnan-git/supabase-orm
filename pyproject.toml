@@ -35,7 +35,7 @@ dependencies = [
 Homepage = "https://github.com/viperadnan-git/supabase-orm"
 Repository = "https://github.com/viperadnan-git/supabase-orm"
 Issues = "https://github.com/viperadnan-git/supabase-orm/issues"
-Documentation = "https://viperadnan-git.github.io/supabase-orm/"
+Documentation = "https://supabase-orm.readthedocs.io"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "unasync>=0.6", "ruff>=0.15.12"]
@@ -59,8 +59,14 @@ gen_sync = { cmd = "uv run python scripts/gen_sync.py", glob = ["**/_async/**/*.
 ruff = { cmd = "uvx ruff check --fix {staged_files} && uvx ruff format {staged_files}", glob = "*.py" }
 
 [tool.ruff.lint]
-select = ["F", "I"]
-fixable = ["F401", "I"]
+select = ["F", "I", "D"]
+fixable = ["F401", "I", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
 
 [dependency-groups]
 dev = [

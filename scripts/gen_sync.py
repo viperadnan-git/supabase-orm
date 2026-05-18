@@ -67,8 +67,7 @@ def _rewrite_prose(text: str) -> str:
 
 
 class _ProseRule(unasync.Rule):
-    """``unasync.Rule`` extended with docstring/comment regex and the
-    ``# gen_sync: skip-block`` directive."""
+    """``unasync.Rule`` extended with docstring/comment regex and the ``# gen_sync: skip-block`` directive."""
 
     _PROSE_TOKEN_NAMES = frozenset({"STRING", "COMMENT", "FSTRING_MIDDLE"})
 
@@ -229,12 +228,15 @@ def _check(outputs: dict[Path, bytes]) -> int:
 
 def regenerate() -> list[Path]:
     """Programmatic entry point used by ``hatch_build.py`` — no CLI parsing.
-    Returns the files that were written."""
+
+    Returns the files that were written.
+    """
     outputs = _render_all()
     return _write_if_changed(outputs)
 
 
 def cli(argv: list[str] | None = None) -> int:
+    """CLI entry point for the sync generator."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--check",

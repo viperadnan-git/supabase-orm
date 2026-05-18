@@ -50,8 +50,7 @@ def _coerce_on_conflict(spec: "str | Column | list[str | Column] | None") -> str
 def _compile_relation_filter_specs(
     relations: dict[str, tuple[type, bool, Relation]],
 ) -> tuple[tuple[str, str, str], ...]:
-    """Pre-bake ``Relation(filter=...)`` specs into ``(col, op, wire)`` triples
-    ready to feed into postgrest's ``.filter(col, op, value)``."""
+    """Pre-bake ``Relation(filter=...)`` specs into postgrest filter triples."""
     specs: list[tuple[str, str, str]] = []
     for fname, (_cls, _is_list, relation) in relations.items():
         if not relation.filter:
@@ -81,21 +80,26 @@ class _QueryDescriptor:
 
 
 class SupabaseModel(BaseModel):
-    """Base class for tables. Configure per-subclass via class kwargs.
+    """Base class for tables — Pydantic model + PostgREST chain entry point.
 
-    Class kwargs:
-        table:        PostgREST table / view name. Required on concrete subclasses.
-        pk:           Primary key field name. Default ``"id"``.
-        select:       Override the auto-derived select string (escape hatch).
-        query_class:  Use a custom :class:`QueryBuilder` subclass for ``.query``.
-                      Inherited via MRO, so a project-wide base model can set it
-                      once and every subclass picks it up::
+    Subclass with table-creation kwargs:
 
-                          class _AppModel(SupabaseModel):
-                              __query_class__ = MyQueryBuilder
+    - ``table`` — PostgREST table / view name. Required on concrete subclasses.
+    - ``pk`` — Primary key field name. Default ``"id"``.
+    - ``select`` — Override the auto-derived select string (escape hatch).
+    - ``query_class`` — Custom :class:`QueryBuilder` subclass for ``.query``;
+      inherited via MRO, so a project-wide base class can set it once.
 
-                          class User(_AppModel, table="users"):
-                              ...
+    Example:
+        ```python
+        class Pet(SupabaseModel, table="pets"):
+            id: UUID
+            name: str
+            species: str
+
+        pet = await Pet.create(name="Whiskers", species="cat")
+        cats = await Pet.query.eq("species", "cat").all()
+        ```
     """
 
     model_config = ConfigDict(
@@ -170,8 +174,7 @@ class SupabaseModel(BaseModel):
 
     @classmethod
     def _validate_column(cls, name: str) -> None:
-        """Surface typos at call time. Allows scalar fields and any
-        ``relation.column`` form (PostgREST embed-filter syntax)."""
+        """Surface typos at call time; allows ``relation.column`` form too."""
         head, _, _ = name.partition(".")
         if head in cls.model_fields:
             return
@@ -212,9 +215,14 @@ class SupabaseModel(BaseModel):
     ) -> Self | None:
         """Insert a row in a single round-trip.
 
-        ``returning="minimal"`` skips the response body — returns ``None``
-        and avoids the per-row materialization (helpful when RLS forbids
-        SELECT on the row, or for pure side-effect writes).
+        Args:
+            returning: ``"minimal"`` skips the response body and returns
+                ``None`` — useful when RLS forbids SELECT on the row, or
+                for pure side-effect writes.
+            **values: Column values for the new row.
+
+        Returns:
+            The inserted row, or ``None`` when ``returning="minimal"``.
         """
         validate_returning(returning)
         payload = {k: serialize(v) for k, v in values.items()}
@@ -250,6 +258,16 @@ class SupabaseModel(BaseModel):
         *,
         returning: ReturnMode = "representation",
     ) -> list[Self] | None:
+        """Insert multiple rows in one round-trip.
+
+        Args:
+            rows: One dict of column values per row.
+            returning: ``"minimal"`` skips the response body and returns ``None``.
+
+        Returns:
+            The inserted rows, ``[]`` for empty input, or ``None`` when
+            ``returning="minimal"``.
+        """
         validate_returning(returning)
         if not rows:
             return None if returning == "minimal" else []
@@ -314,18 +332,19 @@ class SupabaseModel(BaseModel):
     ) -> Self | None:
         """Insert or update on conflict.
 
-        ``on_conflict``: unique-constraint column(s) used to detect duplicates.
-        Accepts a typed ``Column`` (e.g. ``Pet.f.email``), a list of columns
-        for composite uniques (``[Pet.f.email, Pet.f.tenant_id]``), or a
-        string for arbitrary constraints. ``None`` (default) lets PostgREST
-        fall back to the table's primary key.
+        Args:
+            on_conflict: Unique-constraint column(s) used to detect duplicates.
+                Accepts a typed :class:`Column` (e.g. ``Pet.f.email``), a list
+                of columns for composite uniques, or a raw constraint string.
+                ``None`` falls back to the table's PK.
+            ignore_duplicates: Keep the existing row unchanged on conflict;
+                returns ``None`` since PostgREST sends no body in this case.
+            returning: ``"minimal"`` skips the body and returns ``None``.
+            **values: Column values for the row.
 
-        ``ignore_duplicates=True``: keep the existing row unchanged on conflict.
-        PostgREST returns no data in that case, so this returns ``None`` —
-        call :meth:`find` after if you need the existing row.
-
-        ``returning="minimal"``: skip the body, return ``None``. Compatible
-        with ``ignore_duplicates=True`` — neither path returns data.
+        Returns:
+            The resulting row, or ``None`` for ``ignore_duplicates=True`` /
+            ``returning="minimal"``.
         """
         validate_returning(returning)
         payload = {k: serialize(v) for k, v in values.items()}
@@ -378,7 +397,18 @@ class SupabaseModel(BaseModel):
         ignore_duplicates: bool = False,
         returning: ReturnMode = "representation",
     ) -> list[Self] | None:
-        """Bulk-upsert. See :meth:`upsert` for parameter semantics."""
+        """Bulk-upsert.
+
+        Args:
+            rows: One dict of column values per row.
+            on_conflict: See :meth:`upsert`.
+            ignore_duplicates: See :meth:`upsert`.
+            returning: See :meth:`upsert`.
+
+        Returns:
+            The resulting rows, ``[]`` for empty input, or ``None`` when
+            ``returning="minimal"``.
+        """
         validate_returning(returning)
         if not rows:
             return None if returning == "minimal" else []
@@ -417,9 +447,17 @@ class SupabaseModel(BaseModel):
     ) -> tuple[Self, bool]:
         """Fetch the row matching ``lookup``, or create it.
 
-        Returns ``(obj, created)``. Two round-trips; not race-safe — between
-        the lookup and the insert another writer can land a matching row.
-        For atomic semantics, prefer :meth:`upsert` with a unique constraint.
+        Two round-trips; not race-safe — between the lookup and the insert
+        another writer can land a matching row. For atomic semantics, prefer
+        :meth:`upsert` with a unique constraint.
+
+        Args:
+            defaults: Extra column values applied only on the create branch.
+            **lookup: Equality filters used to locate the existing row.
+
+        Returns:
+            ``(obj, created)`` — ``created`` is ``True`` on insert, ``False``
+            when the row already existed.
         """
         q = cls.query
         for col, val in lookup.items():
@@ -438,7 +476,14 @@ class SupabaseModel(BaseModel):
     ) -> tuple[Self, bool]:
         """Update the row matching ``lookup`` (with ``defaults``), or create.
 
-        Returns ``(obj, created)``. Same race caveats as :meth:`get_or_create`.
+        Same race caveats as :meth:`get_or_create`.
+
+        Args:
+            defaults: Column values applied on update, or on the create branch.
+            **lookup: Equality filters used to locate the existing row.
+
+        Returns:
+            ``(obj, created)`` — ``created`` is ``True`` on insert.
         """
         q = cls.query
         for col, val in lookup.items():
@@ -453,15 +498,13 @@ class SupabaseModel(BaseModel):
     async def update(self, **values: Any) -> Self:
         """Assign the given fields and persist in one call.
 
-        Equivalent to setting each attribute and calling :meth:`save`. Reads
-        more naturally for short updates::
+        Equivalent to setting each attribute and calling :meth:`save`. Each
+        assignment runs through Pydantic's validator (``validate_assignment``
+        is on), so type errors surface before the round-trip.
 
-            await user.update(email="new@example.com", name="New Name")
-
-        Each assignment runs through Pydantic's validator (because
-        ``validate_assignment=True`` is set on ``SupabaseModel``), so
-        type errors surface before the round-trip. Raises
-        ``SupabaseORMUsageError`` if no values are passed.
+        Args:
+            **values: Field=value pairs to set. Must include at least one;
+                cannot target the primary key or a relation field.
         """
         if not values:
             raise SupabaseORMUsageError(

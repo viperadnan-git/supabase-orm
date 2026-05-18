@@ -23,4 +23,5 @@ class SupabaseORMUsageError(SupabaseORMError):
     Covers both setup-time issues (client not initialized, model declared
     without a table) and runtime misuse (unfiltered bulk delete/update,
     cross-table ``as_()``, primary-key change via ``instance.update()``,
-    empty argument lists, etc.)."""
+    empty argument lists, etc.).
+    """

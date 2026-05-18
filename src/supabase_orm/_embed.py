@@ -18,6 +18,17 @@ from pydantic.fields import FieldInfo
 class Relation:
     """Metadata describing a relation embedded into a SupabaseModel field.
 
+    Example:
+        ```python
+        class Pet(SupabaseModel, table="pets"):
+            id: UUID
+            name: str
+            owner: Annotated[Owner, Relation(join="inner", fk="pets_owner_fkey")]
+            tags: Annotated[
+                list[Tag], Relation(through="pet_tags", filter={"deleted": False})
+            ]
+        ```
+
     Args:
         join: ``"left"`` (default) or ``"inner"`` — translates to ``!inner``.
         fk: Foreign-key constraint name for disambiguation. PostgREST uses

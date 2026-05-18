@@ -89,8 +89,7 @@ class Predicate:
 
 
 def _flatten(p: Predicate, kind: type[Predicate]) -> list[Predicate]:
-    """Flatten same-kind nesting so ``a | b | c`` compiles to
-    ``or(a,b,c)`` instead of ``or(or(a,b),c)``."""
+    """Flatten same-kind nesting (``or(or(a,b),c)`` → ``or(a,b,c)``)."""
     if isinstance(p, kind):
         # ``parts`` is set by the And/Or subclasses below; safe to read here.
         return list(p.parts)  # type: ignore[attr-defined]
@@ -112,8 +111,10 @@ class _PredicateAtom(Predicate):
 
 
 class _PredicateGroupBase(Predicate):
-    """Shared body for ``and(...)`` / ``or(...)`` AST nodes — same shape,
-    different keyword. Subclasses set :attr:`_kw` to ``"and"`` or ``"or"``."""
+    """Shared body for ``and(...)`` / ``or(...)`` AST nodes.
+
+    Subclasses set :attr:`_kw` to ``"and"`` or ``"or"``.
+    """
 
     __slots__ = ("parts",)
     _kw: str = ""
@@ -253,8 +254,11 @@ class Column(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class Order:
-    """A single ``ORDER BY`` clause. Build via ``Pet.f.<col>.asc()`` /
-    ``.desc()`` or pass strings to :meth:`QueryBuilder.order_by`."""
+    """A single ``ORDER BY`` clause.
+
+    Build via ``Pet.f.<col>.asc()`` / ``.desc()`` or pass strings to
+    :meth:`QueryBuilder.order_by`.
+    """
 
     column: str
     desc: bool = False
@@ -262,8 +266,7 @@ class Order:
 
     @classmethod
     def parse(cls, spec: str) -> "Order":
-        """Parse the Django-style ``"-col"`` shorthand into an :class:`Order`.
-        Bare ``"col"`` defaults to ascending."""
+        """Parse Django-style ``"-col"`` shorthand; bare ``"col"`` is ascending."""
         spec = spec.strip()
         if spec.startswith("-"):
             return cls(spec[1:], desc=True)
@@ -274,7 +277,7 @@ class Order:
 
 
 class _FieldsAccess:
-    """Runtime namespace exposing typed :class:`Column`\\s for a model.
+    r"""Runtime namespace exposing typed :class:`Column`\\s for a model.
 
     Created once per :class:`SupabaseModel` subclass and attached as
     ``Model.f``. Statically typed with ``__getattr__`` so callers can

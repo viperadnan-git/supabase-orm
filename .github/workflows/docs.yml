@@ -17,6 +17,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      SITE_URL: https://viperadnan-git.github.io/supabase-orm/
     steps:
       - uses: actions/checkout@v6
         with:

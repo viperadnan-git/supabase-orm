@@ -1,5 +1,7 @@
 site_name: supabase-orm
-site_url: https://viperadnan-git.github.io/supabase-orm/
+# Canonical URL. RTD auto-sets READTHEDOCS_CANONICAL_URL; the GH Pages
+# workflow sets SITE_URL. Falls back to the RTD URL for local builds.
+site_url: !ENV [READTHEDOCS_CANONICAL_URL, SITE_URL, "https://supabase-orm.readthedocs.io/"]
 site_description: Lightweight async ORM on top of supabase-py with Pydantic validation.
 repo_url: https://github.com/viperadnan-git/supabase-orm
 repo_name: viperadnan-git/supabase-orm
@@ -28,15 +30,15 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: indigo
-      accent: indigo
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: indigo
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -49,11 +51,18 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.highlight:
       anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+      use_pygments: true
+      default_lang: python
   - pymdownx.inlinehilite
   - pymdownx.snippets:
       base_path: ["."]
   - toc:
       permalink: true
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search
@@ -62,7 +71,7 @@ plugins:
         python:
           paths: [src]
           options:
-            docstring_style: sphinx
+            docstring_style: google
             show_source: true
             show_root_heading: true
             show_root_full_path: false

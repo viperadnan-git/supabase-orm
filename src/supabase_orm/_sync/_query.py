@@ -30,10 +30,12 @@ from typing import (
 
 
 class _Op(StrEnum):
-    """Op-log discriminators. ``StrEnum`` so legacy string comparisons
-    (e.g. ``op[0] == "or"``) keep working — but new code should use the
-    enum members for autocomplete and to keep ``_replay`` /
-    ``_has_filter`` in sync if a new op kind is added."""
+    """Op-log discriminators.
+
+    ``StrEnum`` so legacy string comparisons (e.g. ``op[0] == "or"``) keep
+    working — but new code should use the enum members for autocomplete
+    and to keep ``_replay`` / ``_has_filter`` in sync.
+    """
 
     OP = "op"
     OR = "or"
@@ -297,13 +299,24 @@ def _coerce_order(spec: "str | Column | Order") -> Order:
 
 
 class QueryBuilder(_Filterable, Generic[T]):
-    """Chainable query builder.
+    """Chainable query builder. Subclass to add project-specific methods.
 
-    Build:        ``Pet.query.eq("species", "cat").gte("age", 3).limit(10)``
-    Terminate:    ``.all()`` / ``.first()`` / ``.one()`` / ``.maybe_one()``
-                  / ``.count()`` / ``.all_with_count()`` / ``.delete()``
-                  / ``.update(...)``
-    Escape hatch: ``.raw()`` returns the underlying postgrest builder.
+    Default chain shape::
+
+        Pet.query.eq("species", "cat").gte("age", 3).limit(10).all()
+
+    Subclass example — add a ``paginate(page, size)`` shortcut and bind it via
+    ``query_class=`` so every ``Model.query`` returns the custom builder::
+
+        class PaginatedQB(QueryBuilder):
+            def paginate(self, page: int, size: int = 50) -> "PaginatedQB":
+                return self.range(page * size, (page + 1) * size - 1)
+
+        class Pet(SupabaseModel, table="pets", query_class=PaginatedQB):
+            id: UUID
+            name: str
+
+        page_two = Pet.query.eq("adopted", False).paginate(2).all()
     """
 
     _model: type[T]
@@ -392,27 +405,21 @@ class QueryBuilder(_Filterable, Generic[T]):
     # ─── Projection / rebind ───────────────────────────────────────────────
 
     def as_(self, target: type[U]) -> "QueryBuilder[U]":
-        """Rebind the response shape. ``target`` is any Pydantic ``BaseModel``.
+        """Rebind the response shape.
 
-        Two modes, picked by what you pass:
+        Two modes:
 
-        **Same-table SupabaseModel** — narrows the wire ``select`` to the
-        target's ``__select__`` and validates against it::
+        - **Same-table SupabaseModel** — narrows the wire ``select`` to the
+          target's ``__select__`` and validates against it.
+        - **Plain BaseModel** — validation only, wire ``select`` unchanged.
+          Use when filtering on source columns the lean target doesn't expose.
 
-            Pet.query.eq("adopted", False).as_(PetMini).all()
-            # Wire: ?select=id,name → list[PetMini]
+        Cross-table SupabaseModel targets raise.
 
-        **Plain BaseModel** — validation only, wire ``select`` unchanged.
-        Use when filtering on source columns the lean target doesn't expose::
-
-            class PetCard(BaseModel):
-                id: UUID
-                name: str
-
-            Pet.query.fts("bio", "fluffy").as_(PetCard).all()
-            # Wire: ?select=<full Pet> → list[PetCard]
-
-        Cross-table SupabaseModel targets raise — almost always a mistake.
+        Args:
+            target: A Pydantic ``BaseModel`` subclass; a same-table
+                :class:`SupabaseModel` to narrow projection, or any plain
+                ``BaseModel`` for validation-only rebinding.
         """
         # Late import — _base imports from _query, so we can't import at
         # module load.
@@ -443,11 +450,11 @@ class QueryBuilder(_Filterable, Generic[T]):
         """Run the query with an ad-hoc column projection. Returns raw dicts.
 
         No Pydantic validation, no autocomplete — caller deals with
-        ``row["col"]``. Use for exports, ad-hoc admin queries, anything where
-        defining a projection model would be overkill. ``columns`` may include
-        PostgREST embed syntax (e.g. ``"pets(id,name)"``)::
+        ``row["col"]``. Use for exports or ad-hoc admin queries.
 
-            rows = Pet.query.eq("adopted", False).values("id", "name")
+        Args:
+            *columns: One or more column names. May include PostgREST embed
+                syntax (e.g. ``"pets(id,name)"``).
         """
         if not columns:
             raise SupabaseORMUsageError(".values() requires at least one column.")
@@ -458,8 +465,13 @@ class QueryBuilder(_Filterable, Generic[T]):
     # ─── Debug ─────────────────────────────────────────────────────────────
 
     def explain(self, *, redact: bool = True) -> ExplainResult:
-        """Resolved HTTP request — no execute. Auth headers redacted unless
-        ``redact=False``."""
+        """Resolved HTTP request — no execute.
+
+        Args:
+            redact: When True (default), auth headers (``apikey``,
+                ``Authorization``, ``Cookie``) are replaced with
+                ``***REDACTED***``.
+        """
         return _explain_from_builder(self._make_select(), redact=redact)
 
     # ─── Escape hatch ──────────────────────────────────────────────────────
@@ -478,8 +490,7 @@ class QueryBuilder(_Filterable, Generic[T]):
     # ─── Build helpers ─────────────────────────────────────────────────────
 
     def _make_select(self, *, select: str | None = None, **select_kw: Any) -> Any:
-        """Build a fresh select-style postgrest builder bound to the current
-        client, replay the op log, and apply relation filters."""
+        """Build a fresh select-style postgrest builder, replay the op log."""
         b = (
             get_client()
             .table(self._model.__table__)
@@ -520,8 +531,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         return target
 
     def _apply_relation_filters_on(self, target: Any) -> Any:
-        """Apply ``Relation(filter=...)`` clauses from the pre-baked spec
-        tuple. No-op when the model has no filtered relations."""
+        """Apply pre-baked ``Relation(filter=...)`` clauses to ``target``."""
         for col, op, value in self._model.__relation_filter_specs__:
             target = target.filter(col, op, value)
         return target
@@ -552,9 +562,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         return rows, getattr(resp, "count", None) or 0
 
     def _take(self, n: int) -> list[T]:
-        """Run the query with an ad-hoc ``.limit(n)`` without polluting
-        the op log — so ``first()``/``one()``/``maybe_one()`` are
-        idempotent on repeat calls."""
+        """Ad-hoc ``.limit(n)`` without polluting the op log."""
         resp = execute_logged(self._make_select().limit(n))
         return self._validate_rows(resp.data or [])
 
@@ -584,8 +592,7 @@ class QueryBuilder(_Filterable, Generic[T]):
         return rows[0]
 
     def count(self) -> int:
-        """Count matching rows on a fresh head-only request, replaying the
-        recorded op log so filters (including relation filters) are honored."""
+        """Count matching rows via a head-only request (no body, no validation)."""
         b = self._make_select(select="*", count="exact", head=True)
         resp = execute_logged(b)
         return getattr(resp, "count", None) or 0
@@ -605,23 +612,17 @@ class QueryBuilder(_Filterable, Generic[T]):
     def iter(self, *, batch_size: int = 1000) -> Iterator[T]:
         """Yield every matching row using PK keyset pagination.
 
-        Safe and constant-time at any table size — each batch is a single
-        ``WHERE pk > :cursor ORDER BY pk LIMIT :batch_size`` request that
-        uses the PK index, so per-batch cost is independent of position::
+        Constant-time per batch (uses the PK index). Owns ordering and
+        pagination — chaining ``.order_by()`` / ``.limit()`` / ``.offset()``
+        / ``.range()`` before ``.iter()`` raises.
 
-            for pet in Pet.query.eq("species", "cat").iter():
-                process(pet)
+        Snapshot semantics are loose: rows with ``pk > cursor`` inserted
+        mid-iteration are picked up; rows with ``pk < cursor`` are missed.
+        With monotonic PKs (UUIDv7, serial) the latter can't happen.
+        Race-safe for concurrent deletes.
 
-        Filters compose normally (chain ``.eq()`` / predicates / etc. before
-        ``.iter()``). ``iter()`` owns ordering and pagination, so chaining
-        ``.order_by()`` / ``.limit()`` / ``.offset()`` / ``.range()``
-        before it raises ``SupabaseORMUsageError``.
-
-        Snapshot semantics are loose: rows inserted with ``pk > cursor``
-        after iteration started will be picked up; rows with ``pk <
-        cursor`` will be missed. With monotonic PKs (UUIDv7, serial,
-        sequence) the latter can't happen. Race-safe for concurrent
-        deletes (the deleted row simply doesn't appear).
+        Args:
+            batch_size: Rows per round-trip.
         """
         model = self._model
         pk = model.__pk__
@@ -678,11 +679,13 @@ class QueryBuilder(_Filterable, Generic[T]):
     ) -> list[T] | None:
         """Bulk-delete every matching row.
 
-        ``returning="minimal"``: skip the response body and return ``None``.
+        Args:
+            allow_unfiltered: Required to delete every row when no filter is
+                chained; PostgREST also rejects unfiltered DELETE server-side.
+            returning: ``"minimal"`` skips the body and returns ``None``.
 
-        Raises ``SupabaseORMUsageError`` if no filter has been chained
-        unless ``allow_unfiltered=True`` is passed explicitly. PostgREST also
-        rejects unfiltered DELETE by default at the server.
+        Returns:
+            The deleted rows, or ``None`` when ``returning="minimal"``.
         """
         validate_returning(returning)
         if not allow_unfiltered and not self._has_filter():
@@ -723,10 +726,14 @@ class QueryBuilder(_Filterable, Generic[T]):
     ) -> list[T] | None:
         """Bulk-update every matching row.
 
-        ``returning="minimal"``: skip the response body and return ``None``.
+        Args:
+            allow_unfiltered: Required to update every row when no filter is
+                chained.
+            returning: ``"minimal"`` skips the body and returns ``None``.
+            **values: Column=value pairs to set.
 
-        Raises ``SupabaseORMUsageError`` if no filter has been chained
-        unless ``allow_unfiltered=True`` is passed explicitly.
+        Returns:
+            The updated rows, or ``None`` when ``returning="minimal"``.
         """
         validate_returning(returning)
         if not allow_unfiltered and not self._has_filter():
