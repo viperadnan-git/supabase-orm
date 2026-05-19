@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from supabase_orm import register_serializer
-from supabase_orm._serializers import serialize
+from supabase_orm._serializers import _REGISTRY, _RESOLVED, serialize
 
 
 def test_json_native_passthrough():
@@ -56,6 +56,45 @@ def test_pydantic_basemodel_dumped_to_json_dict():
     m = M(x=1, y=UUID("12345678-1234-5678-1234-567812345678"))
     out = serialize(m)
     assert out == {"x": 1, "y": "12345678-1234-5678-1234-567812345678"}
+
+
+# ─── BaseModel default dump (exclude_unset, sparse JSONB) ─────────────────
+
+
+class _Meta(BaseModel):
+    a: str | None = None
+    b: int = 0
+
+
+def test_basemodel_default_omits_unset_keeps_explicit_none():
+    assert serialize(_Meta()) == {}
+    assert serialize(_Meta(a=None)) == {"a": None}
+    assert serialize(_Meta(b=0)) == {"b": 0}
+
+
+def test_basemodel_roundtrip_stable():
+    assert serialize(_Meta.model_validate({})) == {}
+    assert serialize(_Meta.model_validate({"a": None})) == {"a": None}
+    assert serialize(_Meta.model_validate({"a": "x", "b": 5})) == {"a": "x", "b": 5}
+
+
+def test_basemodel_inside_dict_and_list():
+    assert serialize({"m": _Meta(a="x")}) == {"m": {"a": "x"}}
+    assert serialize([_Meta(), _Meta(a="x")]) == [{}, {"a": "x"}]
+
+
+def test_register_serializer_overrides_basemodel_default():
+    """A user-registered serializer takes priority over the library default."""
+
+    class M(BaseModel):
+        a: str | None = None
+
+    register_serializer(M, lambda v: v.model_dump(mode="json"))
+    try:
+        assert serialize(M()) == {"a": None}
+    finally:
+        _REGISTRY.pop(M, None)
+        _RESOLVED.clear()
 
 
 def test_dict_recursion():

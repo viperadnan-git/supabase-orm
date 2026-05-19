@@ -98,5 +98,6 @@ nav:
       - Predicates: api/predicates.md
       - RPC: api/rpc.md
       - Client lifecycle: api/client.md
+      - Extending: api/extending.md
       - Debugging: api/debug.md
       - Exceptions: api/exceptions.md

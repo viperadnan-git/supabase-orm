@@ -8,15 +8,11 @@ search:
 ## ExplainResult
 
 ::: supabase_orm.ExplainResult
+    options:
+      heading_level: 3
 
 ## Return modes
 
 ::: supabase_orm.ReturnMode
-
-## Custom filter operators and serializers
-
-::: supabase_orm.register_op
-
-::: supabase_orm.register_serializer
-
-::: supabase_orm.serialize
+    options:
+      heading_level: 3

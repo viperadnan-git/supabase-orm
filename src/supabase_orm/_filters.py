@@ -63,8 +63,7 @@ def register_op(
             comma-quoting). Override for ops with a non-standard value shape.
 
     Returns:
-        The registered function (decorator mode) or a decorator (when
-        ``builder`` is omitted).
+        The registered function when ``builder`` is given, otherwise a decorator.
     """
     wire_name = wire or name
 

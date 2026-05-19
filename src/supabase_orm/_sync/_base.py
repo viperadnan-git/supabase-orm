@@ -268,8 +268,7 @@ class SupabaseModel(BaseModel):
             returning: ``"minimal"`` skips the response body and returns ``None``.
 
         Returns:
-            The inserted rows, ``[]`` for empty input, or ``None`` when
-            ``returning="minimal"``.
+            Inserted rows; ``[]`` for empty input; ``None`` when ``returning="minimal"``.
         """
         validate_returning(returning)
         if not rows:
@@ -346,8 +345,7 @@ class SupabaseModel(BaseModel):
             **values: Column values for the row.
 
         Returns:
-            The resulting row, or ``None`` for ``ignore_duplicates=True`` /
-            ``returning="minimal"``.
+            The row; ``None`` for ``ignore_duplicates=True`` or ``returning="minimal"``.
         """
         validate_returning(returning)
         payload = {k: serialize(v) for k, v in values.items()}
@@ -407,8 +405,7 @@ class SupabaseModel(BaseModel):
             returning: See :meth:`upsert`.
 
         Returns:
-            The resulting rows, ``[]`` for empty input, or ``None`` when
-            ``returning="minimal"``.
+            Resulting rows; ``[]`` for empty input; ``None`` when ``returning="minimal"``.
         """
         validate_returning(returning)
         if not rows:
@@ -455,8 +452,7 @@ class SupabaseModel(BaseModel):
             **lookup: Equality filters used to locate the existing row.
 
         Returns:
-            ``(obj, created)`` — ``created`` is ``True`` on insert, ``False``
-            when the row already existed.
+            ``(obj, created)`` — ``created`` is ``True`` on insert, ``False`` if it already existed.
         """
         q = cls.query
         for col, val in lookup.items():
