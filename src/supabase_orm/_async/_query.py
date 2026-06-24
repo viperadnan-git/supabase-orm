@@ -283,6 +283,48 @@ def _fmt_op(op: tuple) -> str:
     return str(op)
 
 
+# postgrest-py's filter builder (update/delete return) lacks order/limit/
+# offset/range; PostgREST honors the URL params directly on PATCH/DELETE.
+def _replay_order(target: Any, order: Order) -> None:
+    if hasattr(target, "order"):
+        kw: dict[str, Any] = {"desc": order.desc}
+        if order.nulls is not None:
+            kw["nullsfirst"] = order.nulls == "first"
+        target.order(order.column, **kw)
+        return
+    suffix = (
+        f".{'nullsfirst' if order.nulls == 'first' else 'nullslast'}"
+        if order.nulls is not None
+        else ""
+    )
+    direction = "desc" if order.desc else "asc"
+    existing = target.request.params.get("order")
+    value = f"{existing + ',' if existing else ''}{order.column}.{direction}{suffix}"
+    target.request.params = target.request.params.set("order", value)
+
+
+def _replay_limit(target: Any, size: int) -> None:
+    if hasattr(target, "limit"):
+        target.limit(size)
+        return
+    target.request.params = target.request.params.add("limit", size)
+
+
+def _replay_offset(target: Any, size: int) -> None:
+    if hasattr(target, "offset"):
+        target.offset(size)
+        return
+    target.request.params = target.request.params.add("offset", size)
+
+
+def _replay_range(target: Any, start: int, end: int) -> None:
+    if hasattr(target, "range"):
+        target.range(start, end)
+        return
+    target.request.params = target.request.params.add("offset", start)
+    target.request.params = target.request.params.add("limit", end - start + 1)
+
+
 def _coerce_order(spec: "str | Column | Order") -> Order:
     """Normalize an ``order_by`` arg to an :class:`Order` instance."""
     if isinstance(spec, Order):
@@ -508,18 +550,13 @@ class QueryBuilder(_Filterable, Generic[T]):
             elif kind is _Op.OR:
                 target = target.or_(op[1])
             elif kind is _Op.ORDER:
-                order: Order = op[1]
-                kw: dict[str, Any] = {"desc": order.desc}
-                if order.nulls is not None:
-                    # postgrest-py expects ``nullsfirst: bool`` — translate.
-                    kw["nullsfirst"] = order.nulls == "first"
-                target = target.order(order.column, **kw)
+                _replay_order(target, op[1])
             elif kind is _Op.LIMIT:
-                target = target.limit(op[1])
+                _replay_limit(target, op[1])
             elif kind is _Op.OFFSET:
-                target = target.offset(op[1])
+                _replay_offset(target, op[1])
             elif kind is _Op.RANGE:
-                target = target.range(op[1], op[2])
+                _replay_range(target, op[1], op[2])
             elif kind is _Op.MATCH:
                 target = target.match(op[1])
             elif kind is _Op.FILTER:

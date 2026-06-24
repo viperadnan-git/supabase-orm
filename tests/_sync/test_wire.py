@@ -194,6 +194,29 @@ def test_in_serializes_each_element_mixed_types(fake_client):
     assert _only(fake_client.builders[0], "in_")[1] == ("id", [str(u1), str(u2)])
 
 
+def test_eq_uses_registered_custom_serializer(fake_client):
+    """User-registered serializers apply to filter values, not just write payloads."""
+    from supabase_orm import register_serializer
+    from supabase_orm._serializers import _REGISTRY, _RESOLVED
+
+    class Money:
+        def __init__(self, cents: int) -> None:
+            self.cents = cents
+
+    register_serializer(Money, lambda v: v.cents)
+    try:
+        fake_client.queue(FakeResponse(data=[]))
+        Row.query.eq("amount", Money(500)).all()
+        assert _only(fake_client.builders[0], "eq")[1] == ("amount", 500)
+
+        fake_client.queue(FakeResponse(data=[]))
+        Row.query.in_("amount", [Money(100), Money(200)]).all()
+        assert _only(fake_client.builders[1], "in_")[1] == ("amount", [100, 200])
+    finally:
+        _REGISTRY.pop(Money, None)
+        _RESOLVED.clear()
+
+
 def test_neq_lt_gte_serialize_values(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     dt = datetime(2024, 5, 1, tzinfo=timezone.utc)
@@ -293,6 +316,61 @@ def test_limit_offset_range_pass_through(fake_client):
     assert _only(b, "limit")[1] == (10,)
     assert _only(b, "offset")[1] == (5,)
     assert _only(b, "range")[1] == (0, 9)
+
+
+# ─── order/limit/offset/range on update/delete builders ────────────────
+
+
+def test_replay_order_limit_offset_range_on_update_builder():
+    from postgrest import SyncPostgrestClient
+
+    from supabase_orm._sync._query import (
+        Order,
+        _replay_limit,
+        _replay_offset,
+        _replay_order,
+        _replay_range,
+    )
+
+    pg = SyncPostgrestClient("http://127.0.0.1:1")
+    b = pg.table("t").update({"x": 1})
+    assert not hasattr(b, "order")
+    _replay_order(b, Order("name", desc=True, nulls="first"))
+    _replay_limit(b, 10)
+    _replay_offset(b, 3)
+    assert str(b.request.params) == "order=name.desc.nullsfirst&limit=10&offset=3"
+
+    b2 = pg.table("t").delete()
+    _replay_range(b2, 5, 9)
+    assert str(b2.request.params) == "offset=5&limit=5"
+
+    b3 = pg.table("t").update({"x": 1})
+    _replay_order(b3, Order("a", desc=False))
+    _replay_order(b3, Order("b", desc=True))
+    assert b3.request.params.get("order") == "a.asc,b.desc"
+
+
+def test_query_update_with_order_limit_does_not_raise_attribute_error():
+    import httpx
+    from postgrest import SyncPostgrestClient
+
+    from supabase_orm._sync._client import use_client
+
+    pg = SyncPostgrestClient("http://127.0.0.1:1")
+
+    class _Shim:
+        def table(self, name):
+            return pg.table(name)
+
+    with use_client(_Shim()):
+        for chain in (
+            lambda: Row.query.eq("n", 1).order_by("name").limit(10).update(name="x"),
+            lambda: Row.query.eq("n", 1).limit(5).delete(),
+            lambda: Row.query.eq("n", 1).offset(3).update(name="x"),
+            lambda: Row.query.eq("n", 1).range(0, 9).update(name="x"),
+        ):
+            with pytest.raises(httpx.ConnectError):
+                chain()
 
 
 # ─── Read terminals build correct request shape ──────────────────────────
