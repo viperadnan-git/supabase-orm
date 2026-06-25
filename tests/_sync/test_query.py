@@ -58,6 +58,21 @@ def test_unknown_column_raises_before_request(fake_client):
         User.query.eq("nope", 1)
 
 
+def test_dotted_relation_column_filter_reaches_wire(fake_client):
+    """``eq("relation.col", v)`` validates and reaches postgrest as-is."""
+    Post._validate_column("author.is_active")
+    fake_client.queue(FakeResponse(data=[]))
+    Post.query.eq("views", 10).eq("author.is_active", False).all()
+    calls = fake_client.builders[0].calls
+    assert ("eq", ("views", 10), {}) in calls
+    assert ("eq", ("author.is_active", False), {}) in calls
+
+
+def test_dotted_relation_column_typo_in_head_still_raises(fake_client):
+    with pytest.raises(AttributeError):
+        Post.query.eq("authr.is_active", False)
+
+
 def test_in_serializes_each_element(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     a, b = uuid4(), uuid4()
