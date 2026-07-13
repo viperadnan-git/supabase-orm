@@ -10,6 +10,12 @@ from supabase_orm import Relation, SupabaseModel
 from .conftest import Owner, Pet, PetWithOwnerInner, PetWithOwnerLeft
 
 
+class OwnerWithPets(SupabaseModel, table="orm_test_owners"):
+    id: UUID
+    email: str
+    pets: Annotated[list[Pet], Relation(join="inner")] = []
+
+
 class PetSlim(SupabaseModel, table="orm_test_pets"):
     id: UUID
     name: str
@@ -133,3 +139,71 @@ async def test_create_with_relations_refetches_with_embed(clean):
     )
     assert p.owner.id == owner.id
     assert p.owner.email == owner.email
+
+
+async def _seed_two_owners(clean) -> tuple[Owner, Owner]:
+    """Owner A with 2 pets, owner B with 1 pet."""
+    oa = await Owner.create(email=f"a-{uuid4()}@x.test")
+    ob = await Owner.create(email=f"b-{uuid4()}@x.test")
+    for i in range(2):
+        await Pet.create(
+            owner_id=oa.id,
+            name=f"pa{i}",
+            species="cat",
+            adopted=False,
+            tags=[],
+            amount=0,
+        )
+    await Pet.create(
+        owner_id=ob.id, name="pb0", species="dog", adopted=False, tags=[], amount=0
+    )
+    return oa, ob
+
+
+async def test_count_honors_embedded_column_filter(clean):
+    oa, _ = await _seed_two_owners(clean)
+    q = PetWithOwnerInner.query.eq("owner.email", oa.email)
+    assert len(await q.all()) == 2
+    # count() must agree with all() on the same chain (embed kept).
+    assert await PetWithOwnerInner.query.eq("owner.email", oa.email).count() == 2
+    assert await PetWithOwnerInner.query.eq("owner.email", "nobody@x.test").count() == 0
+
+
+async def test_exists_honors_embedded_column_filter(clean):
+    oa, _ = await _seed_two_owners(clean)
+    assert await PetWithOwnerInner.query.eq("owner.email", oa.email).exists() is True
+    assert (
+        await PetWithOwnerInner.query.eq("owner.email", "nobody@x.test").exists()
+        is False
+    )
+
+
+async def test_order_by_to_one_embedded_column(clean):
+    oa, ob = await _seed_two_owners(clean)
+    asc = [
+        p.owner.email
+        for p in await PetWithOwnerInner.query.order_by("owner.email").all()
+    ]
+    assert asc == sorted(asc)
+    desc = [
+        p.owner.email
+        for p in await PetWithOwnerInner.query.order_by("-owner.email").all()
+    ]
+    assert desc == sorted(desc, reverse=True)
+
+
+async def test_count_to_many_inner_embed_counts_parents(clean):
+    """count() over a to-many !inner embed returns parent rows, not joined rows."""
+    oa = await Owner.create(email=f"a-{uuid4()}@x.test")
+    ob = await Owner.create(email=f"b-{uuid4()}@x.test")
+    await Owner.create(email=f"c-{uuid4()}@x.test")  # no pets → dropped by !inner
+    for _ in range(3):
+        await Pet.create(
+            owner_id=oa.id, name="x", species="cat", adopted=False, tags=[], amount=0
+        )
+    await Pet.create(
+        owner_id=ob.id, name="y", species="dog", adopted=False, tags=[], amount=0
+    )
+    assert len(await OwnerWithPets.query.all()) == 2
+    assert await OwnerWithPets.query.count() == 2
+    assert await OwnerWithPets.query.exists() is True

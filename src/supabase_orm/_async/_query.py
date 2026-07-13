@@ -426,8 +426,19 @@ class QueryBuilder(_Filterable, Generic[T]):
         for c in columns:
             order = _coerce_order(c)
             self._model._validate_column(order.column)
-            self._ops.append((_Op.ORDER, order))
+            self._ops.append((_Op.ORDER, self._order_for_relation(order)))
         return self
+
+    def _order_for_relation(self, order: Order) -> Order:
+        """Rewrite ``rel.col`` ordering to PostgREST's embed form ``rel(col)``.
+
+        Whether the shape is orderable is PostgREST's call — a bad *column* is
+        still caught early by ``_validate_column``.
+        """
+        head, dot, rest = order.column.partition(".")
+        if not dot or head not in self._model.__relations__:
+            return order
+        return Order(column=f"{head}({rest})", desc=order.desc, nulls=order.nulls)
 
     def limit(self, n: int) -> Self:
         self._ops.append((_Op.LIMIT, n))
@@ -626,20 +637,14 @@ class QueryBuilder(_Filterable, Generic[T]):
         return rows[0]
 
     async def count(self) -> int:
-        """Count matching rows via a head-only request (no body, no validation)."""
-        b = self._make_select(select="*", count="exact", head=True)
+        """Exact count, head-only request. Embed-aware select keeps ``!inner`` joins."""
+        b = self._make_select(count="exact", head=True)
         resp = await execute_logged(b)
         return getattr(resp, "count", None) or 0
 
     async def exists(self) -> bool:
-        """Return ``True`` iff at least one row matches the current filters.
-
-        Wire shape: ``select=<pk>&limit=1`` — projects the PK only, fetches
-        at most one row, skips Pydantic validation. Cheap on tables of any
-        size, and unlike ``count() > 0`` does not ask Postgres for an exact
-        total.
-        """
-        b = self._make_select(select=self._model.__pk__).limit(1)
+        """``True`` iff any row matches. Embed-aware select + ``limit=1``, no validation."""
+        b = self._make_select().limit(1)
         resp = await execute_logged(b)
         return bool(resp.data)
 

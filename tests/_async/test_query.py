@@ -122,6 +122,14 @@ async def test_order_by_handles_desc_prefix(fake_client):
     assert orders[1] == ("order", ("id",), {"desc": False})
 
 
+async def test_order_by_relation_column_uses_embed_syntax(fake_client):
+    """rel.col → rel(col); capability (to-many, nesting) is PostgREST's call."""
+    fake_client.queue(FakeResponse(data=[]))
+    await Post.query.order_by("-author.email").all()
+    order = next(c for c in fake_client.builders[0].calls if c[0] == "order")
+    assert order == ("order", ("author(email)",), {"desc": True})
+
+
 async def test_limit_offset_range(fake_client):
     fake_client.queue(FakeResponse(data=[]))
     await User.query.limit(10).offset(5).range(0, 9).all()
@@ -220,7 +228,8 @@ async def test_count_uses_head_select_and_replays_ops(fake_client):
         if any(c[0] == "select" and c[2].get("head") for c in b.calls)
     )
     select_call = next(c for c in count_builder.calls if c[0] == "select")
-    assert select_call[1] == ("*",)
+    # Embed-aware select so embedded-column filters keep their !inner join.
+    assert select_call[1] == (User.__select__,)
     assert select_call[2] == {"count": "exact", "head": True}
     assert ("eq", ("is_active", True), {}) in count_builder.calls
 
@@ -235,8 +244,8 @@ async def test_exists_true_when_row_returned(fake_client):
     assert await User.query.eq("is_active", True).exists() is True
     b = fake_client.builders[-1]
     select_call = next(c for c in b.calls if c[0] == "select")
-    # Projects PK only — no count, no head.
-    assert select_call[1] == ("id",)
+    # Embed-aware select, limit 1 — no count, no head.
+    assert select_call[1] == (User.__select__,)
     assert "count" not in select_call[2] and "head" not in select_call[2]
     assert ("limit", (1,), {}) in b.calls
     assert ("eq", ("is_active", True), {}) in b.calls
