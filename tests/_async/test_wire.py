@@ -393,6 +393,30 @@ async def test_one_and_maybe_one_use_limit_2(fake_client):
     assert _only(fake_client.builders[0], "limit")[1] == (2,)
 
 
+async def test_chained_limit_caps_terminal_and_sends_one_param(fake_client):
+    fake_client.queue(FakeResponse(data=[_row(uuid4())]))
+    await Row.query.eq("is_active", True).limit(1).maybe_one()
+    assert _only(fake_client.builders[0], "limit")[1] == (1,)
+
+
+async def test_chained_limit_wider_than_terminal_keeps_terminal_cap(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.eq("is_active", True).limit(50).first()
+    assert _only(fake_client.builders[0], "limit")[1] == (1,)
+
+
+async def test_chained_range_capped_by_terminal(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.eq("is_active", True).range(10, 19).first()
+    assert _only(fake_client.builders[0], "range")[1] == (10, 10)
+
+
+async def test_exists_respects_chained_limit(fake_client):
+    fake_client.queue(FakeResponse(data=[]))
+    await Row.query.eq("is_active", True).limit(1).exists()
+    assert _only(fake_client.builders[0], "limit")[1] == (1,)
+
+
 async def test_all_with_count_passes_count_exact(fake_client):
     fake_client.queue(FakeResponse(data=[], count=0))
     await Row.query.eq("is_active", True).all_with_count()

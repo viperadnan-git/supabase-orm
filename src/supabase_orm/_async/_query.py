@@ -539,20 +539,37 @@ class QueryBuilder(_Filterable, Generic[T]):
 
     # ─── Build helpers ─────────────────────────────────────────────────────
 
-    def _make_select(self, *, select: str | None = None, **select_kw: Any) -> Any:
-        """Build a fresh select-style postgrest builder, replay the op log."""
+    def _make_select(
+        self,
+        *,
+        select: str | None = None,
+        limit_cap: int | None = None,
+        **select_kw: Any,
+    ) -> Any:
+        """Build a fresh select-style postgrest builder, replay the op log.
+
+        ``limit_cap`` caps the effective ``limit``: a tighter chained
+        ``.limit()``/``.range()`` wins, and only one ``limit`` param is sent.
+        """
         b = (
             get_client()
             .table(self._model.__table__)
             .select(select if select is not None else self._select, **select_kw)
         )
-        b = self._replay(b)
+        b = self._replay(b, limit_cap=limit_cap)
+        if limit_cap is not None and not any(
+            op[0] in (_Op.LIMIT, _Op.RANGE) for op in self._ops
+        ):
+            _replay_limit(b, limit_cap)
         return self._apply_relation_filters_on(b)
 
     # ─── Internal replay ───────────────────────────────────────────────────
 
-    def _replay(self, target: Any) -> Any:
-        """Replay the recorded op log onto ``target`` (a postgrest builder)."""
+    def _replay(self, target: Any, *, limit_cap: int | None = None) -> Any:
+        """Replay the recorded op log onto ``target`` (a postgrest builder).
+
+        ``limit_cap`` clamps the replayed ``limit``/``range``.
+        """
         for op in self._ops:
             kind = op[0]
             if kind is _Op.OP:
@@ -563,11 +580,15 @@ class QueryBuilder(_Filterable, Generic[T]):
             elif kind is _Op.ORDER:
                 _replay_order(target, op[1])
             elif kind is _Op.LIMIT:
-                _replay_limit(target, op[1])
+                size = op[1] if limit_cap is None else min(op[1], limit_cap)
+                _replay_limit(target, size)
             elif kind is _Op.OFFSET:
                 _replay_offset(target, op[1])
             elif kind is _Op.RANGE:
-                _replay_range(target, op[1], op[2])
+                start, end = op[1], op[2]
+                if limit_cap is not None:
+                    end = min(end, start + limit_cap - 1)
+                _replay_range(target, start, end)
             elif kind is _Op.MATCH:
                 target = target.match(op[1])
             elif kind is _Op.FILTER:
@@ -607,8 +628,8 @@ class QueryBuilder(_Filterable, Generic[T]):
         return rows, getattr(resp, "count", None) or 0
 
     async def _take(self, n: int) -> list[T]:
-        """Ad-hoc ``.limit(n)`` without polluting the op log."""
-        resp = await execute_logged(self._make_select().limit(n))
+        """At most ``n`` rows, without polluting the op log."""
+        resp = await execute_logged(self._make_select(limit_cap=n))
         return self._validate_rows(resp.data or [])
 
     async def first(self) -> T | None:
@@ -644,7 +665,7 @@ class QueryBuilder(_Filterable, Generic[T]):
 
     async def exists(self) -> bool:
         """``True`` iff any row matches. Embed-aware select + ``limit=1``, no validation."""
-        b = self._make_select().limit(1)
+        b = self._make_select(limit_cap=1)
         resp = await execute_logged(b)
         return bool(resp.data)
 
